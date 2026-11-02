@@ -134,7 +134,7 @@ function renderWallet(){
 }
 function spend(p,n){
   if(n<=0)return true;
-  if(APP.credits<n){toast(`积分不足：需要 ${num(n)}，余额 ${num(APP.credits)}。可在左下角重置演示额度`);return false}
+  if(APP.credits<n){toast(`积分不足：需要 ${num(n)}，余额 ${num(APP.credits)}。可点右上角积分旁的「重置」恢复演示额度`);return false}
   APP.credits-=n;p.spent=(p.spent||0)+n;Store.saveWallet().catch(()=>{});renderWallet();touch(p);return true;
 }
 function estHtml(n,label='预计消耗'){const short=n>APP.credits;return `<span class="est ${short?'short':''}"><span class="hint">${label}</span><b>${num(n)} 积分</b>${short?'<span class="hint">余额不足</span>':''}</span>`}
@@ -843,10 +843,50 @@ $$('[data-goto]').forEach(b=>b.onclick=()=>setView(b.dataset.goto));
 $('#newShop').onclick=()=>{openProject(newProject('shop'));toast('已新建电商项目')};
 $('#newDrama').onclick=()=>{openProject(newProject('drama'));toast('已新建短剧项目')};
 
+/* ---------- 首页 ---------- */
+function homeShop(sku,type,style,size,seed,max){const cv=document.createElement('canvas');renderImage(cv,{sku,type,style,size,seed},max);return cv}
+function homeFrame(shot,look,wide,w,redo){const cv=document.createElement('canvas');const W=wide?w:Math.round(w*9/16),H=wide?Math.round(w*9/16):w;cv.width=W;cv.height=H;drawFrame(cv.getContext('2d'),W,H,{...shot,patches:[]},.5,{look,onImg:redo});return cv}
+function homeShots(){const st=dr();return st.shots&&st.shots.length?st.shots:mockStoryboard(storyOf(st))}
+let homeT=0;function homeSoon(){clearTimeout(homeT);homeT=setTimeout(()=>{if(APP.view==='home')renderHome()},120)}
+function renderHome(){
+  const skus=(sh().skus||[]).filter(Boolean),shots=homeShots();
+  const es=$('#entryShop');es.innerHTML='';
+  if(skus.length){[['main','cream','sq'],['scene','fresh','detail'],['main','tech','sq']].forEach(([t,st,sz],i)=>es.appendChild(homeShop(skus[i%skus.length],t,st,sz,30+i,i===1?132:104)))}
+  const ed=$('#entryDrama');ed.innerHTML='';
+  shots.slice(0,3).forEach((s,i)=>ed.appendChild(homeFrame(s,['film','real','anime'][i],false,i===1?176:148,homeSoon)));
+  // 最近项目
+  const ps=APP.projects.slice().sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,7);
+  $('#recentHint').textContent=ps.length?`共 ${APP.projects.length} 个项目`:'';
+  const R=$('#recent');R.innerHTML='';
+  ps.forEach(pj=>{const b=document.createElement('button');b.type='button';b.className='panel rcard';b.dataset.id=pj.id;
+    b.innerHTML=`<div class="rcover"><span class="kind">${pj.kind==='shop'?'电商图片':'短剧'}</span></div><div class="rbody"><h4>${esc(pj.name)}</h4><span>${projSummary(pj)}</span><span>${pj.saved?'更新于 '+dayLabel(pj.updatedAt)+' '+hm(pj.updatedAt):pj.sample?'示例项目':'未保存'}</span></div>`;
+    const cov=b.querySelector('.rcover');let cv=null;
+    try{
+      if(pj===SHOP&&sh().results.length){const r=sh().results[0];cv=homeShop(skuById(r.skuId)||skus[0],r.type,r.style,'sq',r.seed,320)}
+      else if(pj===DRAMA){const s=homeShots()[0];if(s)cv=homeFrame(s,dr().look,true,320,homeSoon)}
+    }catch(e){cv=null}
+    if(cv)cov.prepend(cv);else cov.insertAdjacentHTML('beforeend',`<span class="ph">${pj.kind==='shop'?'图':'影'}</span>`);
+    R.appendChild(b)});
+  R.insertAdjacentHTML('beforeend','<button type="button" class="rnew" data-new="shop"><b>+</b>新建电商项目</button><button type="button" class="rnew" data-new="drama"><b>+</b>新建短剧项目</button>');
+  // 灵感画廊
+  const G=$('#gallery');G.innerHTML='';
+  const A=[],B=[];
+  const plan=[['main','cream','xhs'],['scene','fresh','sq'],['main','guochao','detail'],['white','minimal','sq'],['scene','tech','dy'],['main','gray','sq'],['scene','cream','xhs'],['main','fresh','detail']];
+  if(skus.length)plan.forEach(([t,st,sz],i)=>{const k=skus[i%skus.length];A.push({kind:'shop',cv:homeShop(k,t,st,sz,60+i,340),cap:k.name||'商品',sub:`${STYLES[st].name} · ${SIZES[sz].label}`})});
+  const looks=['film','real','anime'];
+  shots.slice(0,4).forEach((s,i)=>B.push({kind:'drama',cv:homeFrame(s,looks[i%3],true,340,homeSoon),cap:`${dr().title||'短剧'} · 第 ${i+1} 镜`,sub:LOOK_NAME[looks[i%3]]}));
+  const order=[];while(A.length||B.length){if(A.length)order.push(A.shift());if(A.length)order.push(A.shift());if(B.length)order.push(B.shift())}
+  order.filter(Boolean).forEach(it=>{const f=document.createElement('figure');f.className='gitem';f.dataset.kind=it.kind;f.appendChild(it.cv);f.insertAdjacentHTML('beforeend',`<figcaption><span>${esc(it.cap)}</span><i>${esc(it.sub)}</i></figcaption>`);f.style.cursor='pointer';G.appendChild(f)});
+}
+$('#recent').onclick=e=>{const n=e.target.closest('[data-new]');if(n){openProject(newProject(n.dataset.new));return}
+  const c=e.target.closest('.rcard');if(c)openProject(APP.projects.find(p=>p.id===c.dataset.id))};
+$('#gallery').onclick=e=>{const f=e.target.closest('.gitem');if(f)setView(f.dataset.kind)};
+document.addEventListener('click',e=>{const l=e.target.closest('[data-view-link]');if(l)setView(l.dataset.viewLink)});
+
 function setView(v){
   APP.view=v;$$('.nav-btn').forEach(x=>x.setAttribute('aria-current',x.dataset.view===v));
-  ['shop','drama','projects','history'].forEach(k=>$('#view-'+k).hidden=k!==v);stopPlay();$$('.pop').forEach(p=>p.hidden=true);
-  if(v==='projects')renderProjects();if(v==='history')renderHistory();
+  ['home','shop','drama','projects','history'].forEach(k=>$('#view-'+k).hidden=k!==v);scrollTo(0,0);stopPlay();$$('.pop').forEach(p=>p.hidden=true);
+  if(v==='projects')renderProjects();if(v==='history')renderHistory();if(v==='home')renderHome();
   try{localStorage.setItem('vs-view',v)}catch(e){}
 }
 $$('.nav-btn').forEach(b=>b.onclick=()=>setView(b.dataset.view));
@@ -859,7 +899,7 @@ async function init(){
   await Store.init();
   const [dot,txt]=STORE_TXT[Store.mode];$('#cloudDot').className='dot '+dot;$('#cloudTxt').textContent=txt;
   ensureCurrent();renderWallet();$('#bootMsg').remove();
-  let v='shop';try{v=localStorage.getItem('vs-view')||'shop'}catch(e){}
-  setView(['shop','drama','projects','history'].includes(v)?v:'shop');
+  let v='home';try{v=localStorage.getItem('vs-view')||'home'}catch(e){}
+  setView(['home','shop','drama','projects','history'].includes(v)?v:'home');
 }
 (document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(init);
