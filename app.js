@@ -1,3 +1,18 @@
+/* 主题切换：跟随系统 → 浅色 → 深色 */
+(function(){
+  const ICON={system:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 010 16z" fill="currentColor"/></svg>',
+    light:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+    dark:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 14.5A8 8 0 019.5 4 8 8 0 1020 14.5z"/></svg>'};
+  const LBL={system:'主题：跟随系统',light:'主题：浅色',dark:'主题：深色'};
+  let mode='system'; try{mode=localStorage.getItem('hy-theme')||'system'}catch(e){}
+  function apply(){const r=document.documentElement; if(mode==='system')r.removeAttribute('data-theme'); else r.setAttribute('data-theme',mode);
+    const b=document.getElementById('themeBtn'); if(b){b.innerHTML=ICON[mode];b.title=LBL[mode];b.setAttribute('aria-label',LBL[mode])}}
+  apply();
+  document.addEventListener('DOMContentLoaded',apply);
+  document.addEventListener('click',e=>{if(!e.target.closest('#themeBtn'))return;
+    mode={system:'light',light:'dark',dark:'system'}[mode]; try{localStorage.setItem('hy-theme',mode)}catch(e){} apply()});
+})();
+
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
 const FONT='"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif';
 const rid=p=>(p||'x')+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
