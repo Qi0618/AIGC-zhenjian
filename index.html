@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>视觉创作工作台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand">视觉创作工作台<small>VISUAL STUDIO · DEMO</small></div>
+    <nav>
+      <div class="nav-group">创作</div>
+      <button class="nav-btn" data-view="shop" aria-current="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>电商图片</button>
+      <button class="nav-btn" data-view="drama" aria-current="false"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="5" width="15" height="14" rx="2"/><path d="M17 10l5-3v10l-5-3z"/></svg>短剧生成</button>
+      <div class="nav-group">管理</div>
+      <button class="nav-btn" data-view="projects" aria-current="false"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>项目</button>
+      <button class="nav-btn" data-view="history" aria-current="false"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>历史记录</button>
+    </nav>
+    <div class="side-note">
+      <div class="wallet-box"><span>积分余额 · 演示额度</span><div class="row"><b id="walletSide">–</b><button class="btn sm ghost" id="walletReset">重置</button></div></div>
+      <span class="cloud"><span class="dot" id="cloudDot"></span><span id="cloudTxt">正在连接存储…</span></span>
+      <span>图片和视频由本地画布模拟生成，未调用模型。</span>
+    </div>
+  </aside>
+
+  <main>
+    <div class="loading" id="bootMsg">正在加载你的项目…</div>
+
+    <!-- ============ 电商图 ============ -->
+    <section id="view-shop" hidden>
+      <div class="head">
+        <div><h1>电商图片</h1><p>批量导入 SKU，按套图方案为每个商品生成整套图，再按平台批量改尺寸或换风格。</p></div>
+        <span class="mock"><b>●</b> MOCK 模式</span>
+      </div>
+      <div class="panel pbar">
+        <span class="plabel">项目</span><input type="text" id="pnameShop" aria-label="项目名称">
+        <span class="save" id="saveShop"></span>
+        <span class="spent" id="spentShop"></span>
+        <button class="btn ghost" data-goto="projects">全部项目</button>
+        <button class="btn" id="newShop">新建项目</button>
+      </div>
+      <div class="shop">
+        <div class="panel config">
+          <div class="csec">
+            <div class="csec-h"><h3>商品 SKU<span id="skuCount"></span></h3>
+              <span style="display:flex;gap:6px"><button class="btn sm" id="addSku">新增</button><label class="btn sm primary file-label" for="skuFiles">批量上传<input type="file" id="skuFiles" accept="image/*" multiple></label></span></div>
+            <div class="sku-list" id="skuList"></div>
+            <div class="sku-edit" id="skuEdit"></div>
+          </div>
+          <div class="csec">
+            <div class="csec-h"><h3>套图方案</h3><span class="hint">每个勾选的 SKU 都会出一整套</span></div>
+            <div class="field"><span class="label">图片类型（可多选）</span><div class="chips" id="typeChips"></div></div>
+            <div class="field"><span class="label">风格 · 示例图用当前选中的商品</span><div class="style-grid" id="styleGrid"></div></div>
+            <div class="field"><span class="label">尺寸（可多选）</span><div class="chips" id="sizeChips"></div></div>
+            <div class="field"><span class="label">自定义尺寸（像素）</span>
+              <div class="custom-add" id="customAddPlan"><input type="text" placeholder="名称，如 拼多多" aria-label="尺寸名称"><input type="number" placeholder="宽" min="100" max="4096" aria-label="宽"><span class="x">×</span><input type="number" placeholder="高" min="100" max="4096" aria-label="高"><button class="btn sm" type="button">添加</button></div></div>
+            <div class="field" style="flex-direction:row;align-items:center;justify-content:space-between">
+              <span class="label" style="margin:0">每种组合生成张数</span>
+              <div class="stepper"><button type="button" id="perMinus" aria-label="减少">−</button><span class="mono" id="perVal">1</span><button type="button" id="perPlus" aria-label="增加">+</button></div>
+            </div>
+            <div class="plan-sum" id="planSum"></div>
+            <button class="btn primary big" id="genBtn" type="button">生成整套图</button>
+          </div>
+        </div>
+
+        <div class="results">
+          <div class="panel toolbar">
+            <span class="count" id="selCount"></span>
+            <button class="btn ghost" id="selAll">全选</button>
+            <button class="btn" id="resizeBtn">批量改尺寸</button>
+            <button class="btn" id="restyleBtn">批量改风格</button>
+            <button class="btn" id="exportBtn">导出</button>
+            <button class="btn ghost" id="delBtn">删除</button>
+            <div class="panel pop" id="resizePop" hidden>
+              <h4>批量改尺寸</h4>
+              <div class="hint" style="margin-top:-6px">为每张选中的图生成所勾选尺寸的版本，构图按新比例重新排版。</div>
+              <div class="size-list" id="sizeList"></div>
+              <div class="custom-add" id="customAddPop"><input type="text" placeholder="自定义名称" aria-label="尺寸名称"><input type="number" placeholder="宽" aria-label="宽"><span class="x">×</span><input type="number" placeholder="高" aria-label="高"><button class="btn sm" type="button">添加</button></div>
+              <div class="pop-actions"><span class="est" id="resizeEst"></span><button class="btn ghost" data-close>取消</button><button class="btn primary" id="resizeApply">生成</button></div>
+            </div>
+            <div class="panel pop" id="restylePop" hidden>
+              <h4>批量改风格</h4>
+              <div class="hint" style="margin-top:-6px">保持商品与尺寸不变，替换选中图片的背景风格。</div>
+              <div class="style-grid" id="restyleGrid"></div>
+              <div class="pop-actions"><span class="est" id="restyleEst"></span><button class="btn ghost" data-close>取消</button><button class="btn primary" id="restyleApply">应用</button></div>
+            </div>
+          </div>
+          <div class="filter" id="filter"></div>
+          <div id="groups"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 短剧 ============ -->
+    <section id="view-drama" hidden>
+      <div class="head">
+        <div><h1>短剧生成</h1><p>设定故事与角色，生成分镜脚本，确认关键帧后再逐镜生成视频。</p></div>
+        <span class="mock"><b>●</b> MOCK 模式</span>
+      </div>
+      <div class="panel pbar">
+        <span class="plabel">项目</span><input type="text" id="pnameDrama" aria-label="项目名称">
+        <span class="save" id="saveDrama"></span>
+        <span class="spent" id="spentDrama"></span>
+        <button class="btn ghost" data-goto="projects">全部项目</button>
+        <button class="btn" id="newDrama">新建项目</button>
+      </div>
+      <div class="steps" id="steps"></div>
+
+      <div id="d1" class="panel brief">
+        <div class="bsec">
+          <h3>故事设定</h3>
+          <div class="bgrid">
+            <div class="col">
+              <div class="field"><label class="label" for="dTitle">剧名</label><input type="text" id="dTitle"></div>
+              <div class="field"><label class="label" for="dSyn">故事梗概</label><textarea id="dSyn" style="min-height:110px"></textarea></div>
+              <div class="field"><span class="label">题材</span><div class="chips" id="genreChips"></div></div>
+            </div>
+            <div class="col">
+              <div class="row2">
+                <div class="field"><label class="label" for="dLen">单集时长</label><select id="dLen"><option value="30">30 秒</option><option value="60">60 秒</option><option value="90">90 秒</option></select></div>
+                <div class="field"><label class="label" for="dShots">镜头数</label><select id="dShots"><option value="6">6</option><option value="8">8</option><option value="10">10</option><option value="12">12</option></select></div>
+              </div>
+              <div class="field"><span class="label">画面比例</span><div class="seg" id="ratioSeg"><button type="button" data-v="9:16">9:16 竖屏</button><button type="button" data-v="16:9">16:9 横屏</button></div></div>
+              <div class="field"><span class="label">画风 · 示例图用本剧的角色</span><div class="look-grid" id="lookGrid"></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="bsec">
+          <div class="csec-h"><h3>角色卡</h3><span class="hint">参考图和主色会带进每个镜头，保证同一角色前后一致</span></div>
+          <div class="cast" id="cast"></div>
+        </div>
+        <div class="brief-foot"><span class="hint">切换题材会填入对应示例；修改过内容后不再覆盖。</span><button class="btn primary" id="toScript">生成分镜脚本</button></div>
+      </div>
+
+      <div id="d2" hidden>
+        <div class="sb-head">
+          <div class="sb-stats" id="sbStats"></div>
+          <button class="btn" id="regenAll">重新生成全部</button>
+          <button class="btn primary" id="toKf">下一步：生成关键帧</button>
+        </div>
+        <div class="shots" id="shots"></div>
+        <button class="add-shot" id="addShot">＋ 新增镜头</button>
+      </div>
+
+      <div id="d3" hidden>
+        <div class="panel kf-head">
+          <div class="sb-stats" id="kfStats"></div>
+          <button class="btn" id="kfGenAll">生成全部关键帧</button>
+          <button class="btn" id="kfOkAll">全部确认</button>
+          <button class="btn primary" id="toVideo">下一步：生成视频</button>
+        </div>
+        <div class="kf-grid" id="kfGrid"></div>
+      </div>
+
+      <div id="d4" class="studio" hidden>
+        <div class="studio-left">
+          <div class="panel vset">
+            <div class="field"><label class="label" for="vVoice">配音</label><select id="vVoice"><option>AI 配音 + 字幕</option><option>仅字幕</option><option>无</option></select></div>
+            <span class="hint" id="vHint"></span>
+            <button class="btn" id="exportVideo" disabled>导出成片</button>
+            <button class="btn primary" id="genVideo">生成视频</button>
+          </div>
+          <div class="panel queue" id="queue"></div>
+        </div>
+        <div class="panel player">
+          <div class="screen" id="screen"><canvas id="pv"></canvas></div>
+          <div class="ctrl"><button class="btn" id="playBtn" disabled>播放</button><span class="mono" id="timeLbl">00:00 / 00:00</span></div>
+          <div class="timeline" id="timeline"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 项目 ============ -->
+    <section id="view-projects" hidden>
+      <div class="head"><div><h1>项目</h1><p>每个项目保存商品、套图、分镜、关键帧和视频的全部状态，下次打开从上次停下的地方继续。</p></div></div>
+      <div id="projList"></div>
+    </section>
+
+    <!-- ============ 历史 ============ -->
+    <section id="view-history" hidden>
+      <div class="head"><div><h1>历史记录</h1><p>每一次生成任务的记录和积分消耗，可以直接跳回对应项目。</p></div></div>
+      <div class="panel hist" id="histList"></div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="modal" hidden><div class="modal-box"><canvas id="modalCv"></canvas><span class="mono" id="modalMeta"></span></div></div>
+
+<div class="modal" id="kfEd" hidden>
+  <div class="panel ed">
+    <div class="ed-canvas"><div class="ed-stage" id="edStage"><canvas id="edCv"></canvas><div class="sel-box" id="selBox" hidden></div></div></div>
+    <div class="ed-side">
+      <h3 id="edTitle">调整关键帧</h3>
+      <div class="seg" id="edMode"><button type="button" data-v="full">改提示词重画</button><button type="button" data-v="local">局部重绘</button></div>
+      <div class="field" id="edFull"><label class="label" for="edPrompt">提示词</label><textarea id="edPrompt" style="min-height:170px"></textarea><span class="hint" style="margin-top:6px">默认由分镜、角色卡和画风拼成。改完后整张重新生成，局部重绘会被清空。</span></div>
+      <div class="field" id="edLocal" hidden>
+        <span class="hint">在左侧画面上拖动，框出要重绘的区域。框外的内容保持不变。</span>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin:10px 0 6px"><span class="mono hint" id="edRegion">尚未框选</span><button type="button" class="btn sm ghost" id="edClear">清除选区</button></div>
+        <label class="label" for="edNote">这块区域要改成什么</label><textarea id="edNote" placeholder="例如：把背景的大屏换成发布会产品海报"></textarea>
+      </div>
+      <div class="ed-foot"><span class="est" id="edEst"></span><button type="button" class="btn ghost" id="edCancel">取消</button><button type="button" class="btn primary" id="edGo">重画</button></div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
