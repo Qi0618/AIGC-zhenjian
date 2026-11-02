@@ -56,29 +56,37 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 button,input,select,textarea{font:inherit;color:inherit}
 ::selection{background:var(--accent-soft)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.app{min-height:100vh;display:flex;flex-direction:column;background-image:var(--glow);background-repeat:no-repeat;background-size:100% 560px}
+.app{min-height:100vh;display:grid;grid-template-columns:232px minmax(0,1fr);background-image:var(--glow);background-repeat:no-repeat;background-size:100% 560px}
+.maincol{min-width:0;display:flex;flex-direction:column}
 
-/* ---------- 顶部导航 ---------- */
-.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:40;background:var(--glass);backdrop-filter:saturate(1.6) blur(18px);-webkit-backdrop-filter:saturate(1.6) blur(18px);border-bottom:1px solid var(--line)}
-.topbar-in{height:60px;display:flex;align-items:center;gap:20px;padding-left:max(20px,env(safe-area-inset-left,0px));padding-right:max(20px,env(safe-area-inset-right,0px));max-width:1600px;margin:0 auto}
-.brand{display:flex;align-items:center;gap:10px;flex:none;cursor:pointer;border:0;background:none;padding:0}
+/* ---------- 左侧导航 ---------- */
+.side{position:sticky;top:0;height:100vh;height:100dvh;display:flex;flex-direction:column;gap:18px;padding-block:calc(18px + env(safe-area-inset-top,0px)) calc(16px + env(safe-area-inset-bottom,0px));padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:14px;background:var(--glass);backdrop-filter:saturate(1.6) blur(18px);-webkit-backdrop-filter:saturate(1.6) blur(18px);border-right:1px solid var(--line);z-index:45}
+.brand{display:flex;align-items:center;gap:10px;flex:none;cursor:pointer;border:0;background:none;padding:2px 6px}
 .brand svg{display:block;flex:none}
 .brand-t{display:flex;align-items:baseline;gap:7px;line-height:1}
 .brand-t b{font-weight:900;font-size:19px;letter-spacing:.06em}
 .brand-t small{font-family:var(--f-display);font-weight:600;font-size:12px;color:var(--faint);letter-spacing:.02em}
-nav{display:flex;align-items:center;gap:2px;min-width:0;overflow-x:auto;scrollbar-width:none}
+nav{display:flex;flex-direction:column;gap:2px;min-height:0;overflow-y:auto;scrollbar-width:none}
 nav::-webkit-scrollbar{display:none}
-.nav-btn{position:relative;display:flex;align-items:center;gap:7px;height:36px;padding:0 13px;border:0;background:none;border-radius:999px;cursor:pointer;color:var(--mute);font-size:14px;white-space:nowrap;transition:background .15s,color .15s}
+.nav-grp{font-size:12px;color:var(--faint);padding:16px 12px 6px;letter-spacing:.04em}
+.nav-btn{position:relative;display:flex;align-items:center;gap:10px;width:100%;height:40px;padding:0 12px;border:0;background:none;border-radius:10px;cursor:pointer;color:var(--mute);font-size:14px;white-space:nowrap;text-align:left;transition:background .15s,color .15s}
 .nav-btn svg{flex:none;opacity:.9}
 .nav-btn:hover{color:var(--ink);background:var(--raise)}
 .nav-btn[aria-current="true"]{color:var(--ink);background:var(--raise);font-weight:600}
+.nav-btn[aria-current="true"]::before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:3px;border-radius:3px;background:var(--grad)}
 .nav-btn[aria-current="true"] svg{color:var(--accent)}
+.side-foot{margin-top:auto;display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--raise)}
+.side-foot .ver{font-family:var(--f-mono);font-size:11px;color:var(--faint)}
+
+/* ---------- 右上工具条 ---------- */
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:40;background:var(--glass);backdrop-filter:saturate(1.6) blur(18px);-webkit-backdrop-filter:saturate(1.6) blur(18px);border-bottom:1px solid var(--line)}
+.topbar-in{height:60px;display:flex;align-items:center;gap:20px;padding-left:max(28px,env(safe-area-inset-left,0px));padding-right:max(28px,env(safe-area-inset-right,0px))}
 .top-right{margin-left:auto;display:flex;align-items:center;gap:8px;flex:none}
 .credit-pill{display:flex;align-items:center;gap:8px;height:36px;padding:0 6px 0 12px;border-radius:999px;background:var(--raise);border:1px solid var(--line);font-size:13px}
 .credit-pill .gem{width:16px;height:16px;flex:none}
 .credit-pill b{font-family:var(--f-display);font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:.01em}
 .credit-pill .btn{height:26px;padding:0 10px;border-radius:999px}
-.cloud{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mute);white-space:nowrap}
+.cloud{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mute);line-height:1.4}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
 .dot.on{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 22%,transparent)} .dot.off{background:var(--warn)}
 .icon-btn{width:36px;height:36px;border-radius:999px;border:1px solid var(--line);background:var(--raise);display:grid;place-items:center;cursor:pointer;color:var(--mute);flex:none;transition:color .15s,border-color .15s}
@@ -419,11 +427,18 @@ textarea{resize:vertical;min-height:72px;line-height:1.6}
 .toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--cta);color:var(--cta-ink);padding:10px 18px;border-radius:999px;font-size:13px;font-weight:500;z-index:60;box-shadow:var(--shadow-lg);max-width:calc(100vw - 32px)}
 
 @media (max-width:1180px){.shop{grid-template-columns:1fr}.config{position:static;max-height:none}.csec:last-child{position:static}.studio{grid-template-columns:1fr}.player{position:static}.entries{grid-template-columns:1fr}}
-@media (max-width:980px){.cloud{display:none}.brand-t small{display:none}}
+@media (max-width:1180px) and (min-width:861px){.app{grid-template-columns:200px minmax(0,1fr)}}
 @media (max-width:860px){
-  .topbar-in{height:auto;flex-wrap:wrap;padding-block:10px;gap:10px 12px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
-  nav{order:3;width:100%;margin:0 -4px}
-  .nav-btn{padding:0 11px;font-size:13px}
+  .app{display:flex;flex-direction:column}
+  .side{position:sticky;top:0;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px 12px;padding-block:calc(10px + env(safe-area-inset-top,0px)) 10px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));border-right:0;border-bottom:1px solid var(--line)}
+  .brand{padding:0}
+  .brand-t small{display:none}
+  nav{order:3;width:100%;flex-direction:row;overflow-x:auto;overflow-y:visible}
+  .nav-grp,.side-foot{display:none}
+  .nav-btn{width:auto;height:34px;padding:0 11px;font-size:13px;border-radius:999px}
+  .nav-btn[aria-current="true"]::before{display:none}
+  .topbar{position:static}
+  .topbar-in{height:52px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
   .credit-pill .btn,.avatar{display:none}
   .credit-pill{padding-right:12px}
   main{padding-block:20px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
