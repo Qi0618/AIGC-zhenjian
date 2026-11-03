@@ -16,7 +16,10 @@ const CFG = {
   arkKey: process.env.ARK_API_KEY || '',
   arkBase: (process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/$/, ''),
   imageModel: process.env.ARK_IMAGE_MODEL || 'doubao-seedream-4-0-20260415',
-  llmModel: process.env.ARK_LLM_MODEL || 'deepseek-v4-1-flash-260910',
+  // 分镜大模型：默认走火山方舟；填了 DEEPSEEK_API_KEY 就改走 DeepSeek 官方接口
+  llmKey: process.env.DEEPSEEK_API_KEY || process.env.ARK_API_KEY || '',
+  llmBase: (process.env.DEEPSEEK_API_KEY ? (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com') : (process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3')).replace(/\/$/, ''),
+  llmModel: process.env.DEEPSEEK_API_KEY ? (process.env.DEEPSEEK_MODEL || 'deepseek-chat') : (process.env.ARK_LLM_MODEL || 'deepseek-v4-1-flash-260910'),
   seedanceModel: process.env.ARK_VIDEO_MODEL || 'doubao-seedance-2-0-mini-260615',
   seedanceRes: process.env.ARK_VIDEO_RESOLUTION || '720p',
   klingAk: process.env.KLING_ACCESS_KEY || '',
@@ -105,7 +108,7 @@ async function genImage({ prompt, images = [], width = 1024, height = 1024 }) {
 
 /* ---------------- 分镜脚本：DeepSeek V4.1 Flash ---------------- */
 async function genStoryboard({ story, enums }) {
-  need(CFG.arkKey, '火山方舟 ARK_API_KEY');
+  need(CFG.llmKey, '分镜模型密钥（ARK_API_KEY 或 DEEPSEEK_API_KEY）');
   const s = story || {}; const E = enums || {};
   const chars = (s.chars || []).map((c, i) => `${i}. ${c.name}（${[c.role, c.look].filter(Boolean).join('，')}）`).join('\n') || '（无）';
   const sys = '你是短剧分镜编剧。只输出 JSON，不要任何解释或 Markdown。';
@@ -120,8 +123,8 @@ ${chars}
 输出格式：{"shots":[{"scale":"景别","mood":"光线","cam":"运镜","desc":"画面描述，一两句，写清人物动作和环境","line":"台词或旁白，没有就空字符串","dur":秒数,"cast":[出镜角色序号]}]}
 取值限制：scale 只能是 ${(E.scales || []).join('/')}；mood 只能是 ${moodList}（填括号前的英文）；cam 只能是 ${(E.cams || []).join('/')}；dur 为 2~8 的整数；cast 为上面角色序号组成的数组，最多 3 个。
 要求：开头 3 秒内要有钩子，结尾留悬念；台词口语化，每句不超过 20 字。`;
-  const j = await upstream(CFG.arkBase + '/chat/completions', {
-    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.arkKey },
+  const j = await upstream(CFG.llmBase + '/chat/completions', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.llmKey },
     body: JSON.stringify({ model: CFG.llmModel, temperature: 0.8, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }] }),
   }, 'DeepSeek');
   const text = j.choices?.[0]?.message?.content || '';
@@ -240,7 +243,7 @@ const server = http.createServer(async (req, res) => {
       if (CFG.accessToken && p !== '/api/health' && req.headers['x-access-token'] !== CFG.accessToken) throw new HttpError(401, '需要访问口令');
       if (p === '/api/health') return send(res, 200, {
         ok: true, auth: !!CFG.accessToken, ffmpeg: HAS_FFMPEG,
-        models: { image: !!CFG.arkKey && CFG.imageModel, llm: !!CFG.arkKey && CFG.llmModel, seedance: !!CFG.arkKey && CFG.seedanceModel, kling: !!(CFG.klingAk && CFG.klingSk) && CFG.klingModel },
+        models: { image: !!CFG.arkKey && CFG.imageModel, llm: !!CFG.llmKey && CFG.llmModel, seedance: !!CFG.arkKey && CFG.seedanceModel, kling: !!(CFG.klingAk && CFG.klingSk) && CFG.klingModel },
       });
       if (req.method === 'POST' && p === '/api/image') return send(res, 200, await genImage(await readJson(req)));
       if (req.method === 'POST' && p === '/api/storyboard') return send(res, 200, await genStoryboard(await readJson(req)));
@@ -259,6 +262,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(CFG.port, () => {
   console.log(`绘影已启动：http://localhost:${CFG.port}`);
   console.log(`  火山方舟（Seedream / DeepSeek / Seedance）：${CFG.arkKey ? '已配置' : '未配置 ARK_API_KEY'}`);
+  console.log(`  分镜模型：${CFG.llmKey ? CFG.llmModel + ' @ ' + CFG.llmBase : '未配置'}`);
   console.log(`  可灵 2.5 Turbo：${CFG.klingAk && CFG.klingSk ? '已配置' : '未配置（精品档不可用）'}`);
   console.log(`  ffmpeg 合成成片：${HAS_FFMPEG ? '可用' : '未安装'}`);
 });
