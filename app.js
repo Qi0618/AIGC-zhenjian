@@ -91,8 +91,14 @@ const API={
   /** 分镜脚本：story={genre,title,syn,chars,nShots,len,ratio} → 镜头数组 */
   async generateStoryboard(story){
     if(!LIVE.on)return mockProgress(1100).then(()=>mockStoryboard(story));
-    const r=await api('/api/storyboard',{story:{...story,chars:story.chars.map(c=>({name:c.name,role:c.role,look:c.look}))},enums:{scales:SCALES,moods:Object.keys(MOODS),moodNames:MOOD_NAME,cams:CAMS}});
+    const r=await api('/api/storyboard',{story:slimStory(story),enums:shotEnums()});
     return r.shots.map(x=>toShot([x.scale,x.mood,x.desc,x.line,x.dur,x.cam,x.cast],story.chars));
+  },
+  /** 重写单个镜头（只在正式模式调用）：带上整部分镜做上下文 → 新的镜头字段 */
+  async rewriteShot(story,shots,index){
+    const r=await api('/api/shot',{story:slimStory(story),enums:shotEnums(),index,shots:shots.map(x=>({scale:x.scale,cam:x.cam,dur:x.dur,desc:x.desc,line:x.line}))});
+    const x=r.shot,t=toShot([x.scale,x.mood,x.desc,x.line,x.dur,x.cam,x.cast],story.chars);
+    return{scale:t.scale,mood:t.mood,desc:t.desc,line:t.line,dur:t.dur,cam:t.cam,cast:t.cast};
   },
   /** 关键帧：req={shot,prompt,region|null,note} → {seed,url}；失败 {error} */
   async generateKeyframe(req,onProgress){
@@ -109,14 +115,21 @@ const API={
       const r=await api('/api/image',{prompt,images:refs,width:W,height:H});onProgress&&onProgress(1);return{seed:rseed(),url:r.url};
     }catch(e){return{error:e.message}}finally{clearInterval(tm)}
   },
-  /** 视频：shot 带已确认的关键帧；model=seedance|kling → {url}；失败 {error} */
-  async generateVideo(s,model,onProgress){
+  /** 视频：shot 带已确认的关键帧；model=seedance|kling → {url}；失败 {error}
+      拿到任务 id 后会写进 s.vTask 并调用 onTask，方便保存；刷新页面后用 pollVideo 接着查 */
+  async generateVideo(s,model,onProgress,onTask){
     if(!LIVE.on)return mockProgress(1000+s.dur*260,onProgress).then(()=>({ok:true}));
     try{
       const image=!s.kfUrl||(s.patches||[]).some(x=>x.url)?await frameData(s):s.kfUrl;
       const prompt=`${s.desc}${s.cam&&s.cam!=='固定'?CAM_TXT[s.cam]+'。':'镜头固定。'}${s.line?`人物说：“${s.line}”。`:''}画面风格与首帧一致，人物动作自然流畅。`;
       const {id}=await api('/api/video',{provider:model,image,prompt,duration:s.dur,ratio:dr().ratio});
-      const exp=model==='kling'?150:70,t0=Date.now();let fails=0;
+      s.vTask=id;s.vAt=Date.now();onTask&&onTask();
+      return await API.pollVideo(id,model,onProgress,s.vAt);
+    }catch(e){return{error:e.message}}
+  },
+  async pollVideo(id,model,onProgress,t0=Date.now()){
+    const exp=model==='kling'?150:70;let fails=0;
+    try{
       for(;;){await sleep(5000);let r;try{r=await api('/api/video/'+id);fails=0}catch(e){if(++fails>=4)throw e;continue}
         if(r.status==='succeeded'){onProgress&&onProgress(1);return{url:r.url}}
         if(r.status==='failed')return{error:r.error||'生成失败'};
@@ -124,11 +137,13 @@ const API={
     }catch(e){return{error:e.message}}
   },
 };
+function slimStory(story){return{...story,chars:story.chars.map(c=>({name:c.name,role:c.role,look:c.look}))}}
+function shotEnums(){return{scales:SCALES,moods:Object.keys(MOODS),moodNames:MOOD_NAME,cams:CAMS}}
 function mockProgress(ms,cb){return new Promise(res=>{const t0=performance.now();const tick=()=>{const p=Math.min(1,(performance.now()-t0)/ms);cb&&cb(p);if(p>=1)res();else setTimeout(tick,110)};tick()})}
 
 /* 价格（单位：积分，1 积分 = 0.1 元）。按模型成本约 2 倍定价：
    Seedream 4.0 0.2 元/张 · DeepSeek V4.1 Flash 每次分镜不到 0.01 元 · Seedance 2.0 mini 720p 0.5 元/秒（最短 4 秒） · 可灵 2.5 Turbo 1080p 约 2.5 元/5 秒 */
-const PRICING={image:4,storyboard:2,keyframe:4,inpaint:4,seedancePerSec:10,klingPer5s:50};
+const PRICING={image:4,storyboard:2,rewrite:1,keyframe:4,inpaint:4,seedancePerSec:10,klingPer5s:50};
 function refund(p,n){if(n<=0)return;APP.credits+=n;p.spent=Math.max(0,(p.spent||0)-n);Store.saveWallet().catch(()=>{});renderWallet()}
 function saveUrl(url,name){const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove()}
 function showGate(){$('#gate').hidden=false;setTimeout(()=>$('#gateIn').focus(),50)}
@@ -307,6 +322,8 @@ function newShopState(sample){
   }
   return st;
 }
+// 已扣积分但还没拿到结果的图片任务。页面中途刷新时，打开项目会把这部分退回
+function inflight(p,n){p.state.pendingCost=Math.max(0,(p.state.pendingCost||0)+n)}
 function packShop(st){return{...st,skus:st.skus.map(({src,...k})=>keepImg(k)?k:{...k,lost:true}),results:st.results.map(({sel,dirty,...r})=>r)}}
 function unpackShop(st){st=JSON.parse(JSON.stringify(st||{}));const d=newShopState(false);st={...d,...st,plan:{...d.plan,...(st.plan||{})}};st.customSizes=st.customSizes||{};return st}
 
@@ -472,8 +489,8 @@ $('#groups').onclick=e=>{
   const gs=e.target.closest('[data-gsel]');if(gs){const id=gs.closest('.group').dataset.sku,rs=sh().results.filter(r=>r.skuId===id),all=rs.every(r=>r.sel);rs.forEach(r=>r.sel=!all);renderGroups();return}
   const card=e.target.closest('.card[data-id]');if(!card)return;const r=sh().results.find(x=>x.id==card.dataset.id);if(!r)return;
   if(e.target.closest('.check')){r.sel=!r.sel;card.classList.toggle('sel',r.sel);updateSel();const g=card.closest('.group'),rs=sh().results.filter(x=>x.skuId===g.dataset.sku);$('[data-gsel]',g).textContent=rs.every(x=>x.sel)?'取消本组':'全选本组';return}
-  if(e.target.closest('[data-act=regen]')){const proj=SHOP,cost=priceImage(r.size);if(!spend(proj,cost))return;const b=e.target.closest('[data-act]');b.disabled=true;b.textContent='生成中…';
-    API.generateImages([{skuId:r.skuId,type:r.type,style:r.style,size:r.size,seed:rseed()}]).then(([j])=>{if(j.error){refund(proj,cost);b.disabled=false;b.textContent='重新生成';toast('生成失败，已退回积分：'+j.error);return}r.seed=j.seed;r.url=j.url;r.ver++;r.demo=false;r.dirty=true;touch(proj);if(SHOP===proj)renderGroups();toast(`已重新生成，消耗 ${cost} 积分`);logHistory(proj,'重新生成 1 张图',`${skuById(r.skuId)?.name||''} · ${TYPES[r.type]}`,cost)});return}
+  if(e.target.closest('[data-act=regen]')){const proj=SHOP,cost=priceImage(r.size);if(!spend(proj,cost))return;const b=e.target.closest('[data-act]');b.disabled=true;b.textContent='生成中…';inflight(proj,cost);
+    API.generateImages([{skuId:r.skuId,type:r.type,style:r.style,size:r.size,seed:rseed()}]).then(([j])=>{inflight(proj,-cost);if(j.error){refund(proj,cost);b.disabled=false;b.textContent='重新生成';toast('生成失败，已退回积分：'+j.error);return}r.seed=j.seed;r.url=j.url;r.ver++;r.demo=false;r.dirty=true;touch(proj);if(SHOP===proj)renderGroups();toast(`已重新生成，消耗 ${cost} 积分`);logHistory(proj,'重新生成 1 张图',`${skuById(r.skuId)?.name||''} · ${TYPES[r.type]}`,cost)});return}
   if(e.target.closest('.frame')){renderImage($('#modalCv'),r,1000);const s=size(r.size);$('#modalMeta').textContent=`${skuById(r.skuId)?.name||''} · ${TYPES[r.type]} · ${STYLES[r.style].name} · ${s.label} ${s.w}×${s.h}`;$('#modal').hidden=false}
 };
 $('#modal').onclick=()=>$('#modal').hidden=true;
@@ -487,8 +504,8 @@ function showSkeleton(total,label){
 }
 function runImageJobs(proj,jobs,label,after){
   const cost=jobs.reduce((a,j)=>a+priceImage(j.size),0);if(!spend(proj,cost))return;
-  genBusy=true;renderPlan();const sk=showSkeleton(jobs.length,label);
-  API.generateImages(jobs,p=>sk.update(p)).then(res=>{sk.remove();genBusy=false;const bad=res.filter(j=>j.error),ok=res.filter(j=>!j.error),back=bad.reduce((a,j)=>a+priceImage(j.size),0);refund(proj,back);if(ok.length)after(ok,cost-back);if(bad.length)toast(`${bad.length} 张生成失败，已退回 ${num(back)} 积分：${bad[0].error}`);touch(proj);if(SHOP===proj){renderGroups();renderSkuList()}renderPlan()});
+  genBusy=true;renderPlan();const sk=showSkeleton(jobs.length,label);inflight(proj,cost);
+  API.generateImages(jobs,p=>sk.update(p)).then(res=>{sk.remove();genBusy=false;inflight(proj,-cost);const bad=res.filter(j=>j.error),ok=res.filter(j=>!j.error),back=bad.reduce((a,j)=>a+priceImage(j.size),0);refund(proj,back);if(ok.length)after(ok,cost-back);if(bad.length)toast(`${bad.length} 张生成失败，已退回 ${num(back)} 积分：${bad[0].error}`);touch(proj);if(SHOP===proj){renderGroups();renderSkuList()}renderPlan()});
 }
 $('#genBtn').onclick=()=>{
   const proj=SHOP,p=sh().plan,skus=sh().skus.filter(s=>s.on),jobs=planJobs().map(j=>({...j,seed:rseed()}));if(!jobs.length)return;
@@ -572,7 +589,8 @@ const VARIANTS=['，镜头从人物背后切入','，以玻璃倒影呈现','，
 
 function newDramaState(genre='都市逆袭'){const st={genre,dirty:false,len:30,nShots:8,ratio:'9:16',look:'real',voice:'AI 配音 + 字幕',step:1,maxStep:1,chars:[],shots:[],time:0};fillGenreInto(st,genre);return st}
 function fillGenreInto(st,g){const x=GENRES[g];st.title=x.title;st.syn=x.syn;st.chars=x.chars.map((c,i)=>({id:rid('c'),name:c[0],role:c[1],look:c[2],color:CHAR_COLORS[i%CHAR_COLORS.length]}));st.dirty=false}
-function packDrama(st){const{time,...rest}=st;return{...rest,chars:st.chars.map(({src,...c})=>c),shots:st.shots.map(s=>({...s,kf:s.kf==='run'?(s.kfPrev||'none'):s.kf,video:s.video==='done'?'done':'none',p:0,kp:0}))}}
+// 生成中的状态（kf=run、video=wait/run）原样保存，下次打开项目时由 recoverInterrupted 处理
+function packDrama(st){const{time,...rest}=st;return{...rest,chars:st.chars.map(({src,...c})=>c),shots:st.shots.map(s=>({...s,p:0,kp:0}))}}
 function unpackDrama(st){const d=newDramaState();st=JSON.parse(JSON.stringify(st||{}));return{...d,...st,time:0}}
 const dr=()=>DRAMA.state;
 const charById=id=>dr().chars.find(c=>c.id===id);
@@ -750,7 +768,7 @@ function renderShots(){
       <textarea data-k="desc" aria-label="画面描述">${esc(s.desc)}</textarea>
       <input type="text" data-k="line" value="${esc(s.line)}" placeholder="台词 / 旁白（可空）" aria-label="台词">
     </div>
-    <div class="shot-acts"><button class="btn ghost sm" data-act="rewrite">重写此镜</button><button class="btn ghost sm" data-act="del">删除</button></div>
+    <div class="shot-acts"><button class="btn ghost sm" data-act="rewrite">重写此镜${LIVE.on&&LIVE.models.llm?` <span class="cost">· ${PRICING.rewrite}</span>`:''}</button><button class="btn ghost sm" data-act="del">删除</button></div>
   </article>`).join('');
   $$('.shot',S).forEach((el,i)=>paintShot($('canvas',el),dr().shots[i],i+1,170,{tags:true,onImg:repaintCur}));
 }
@@ -766,6 +784,11 @@ $('#shots').onclick=e=>{
   if(cb){const s=dr().shots.find(x=>x.id===cb.closest('.shot').dataset.id),id=cb.dataset.cast;s.cast=s.cast.includes(id)?s.cast.filter(x=>x!==id):[...s.cast,id].slice(-3);shotEdited(s);touch(DRAMA);renderShots();return}
   const b=e.target.closest('[data-act]');if(!b)return;const el=b.closest('.shot'),arr=dr().shots,i=arr.findIndex(x=>x.id===el.dataset.id),s=arr[i];
   if(b.dataset.act==='del'){arr.splice(i,1);touch(DRAMA);renderShots();toast(`已删除镜头 ${pad2(i+1)}`)}
+  else if(LIVE.on&&LIVE.models.llm){
+    const proj=DRAMA;if(b.disabled||!spend(proj,PRICING.rewrite))return;b.disabled=true;b.textContent='重写中…';
+    API.rewriteShot(storyOf(proj.state),arr,i).then(x=>{Object.assign(s,x);s.seed=rseed();shotEdited(s);touch(proj);
+      const no=pad2(proj.state.shots.indexOf(s)+1);if(DRAMA===proj&&proj.state.step===2)renderShots();toast(`已重写镜头 ${no}，消耗 ${PRICING.rewrite} 积分`);logHistory(proj,`重写镜头 S${no}`,s.desc,PRICING.rewrite)})
+    .catch(e=>{refund(proj,PRICING.rewrite);if(DRAMA===proj&&proj.state.step===2)renderShots();toast('重写失败，已退回积分：'+e.message)})}
   else{const base=s.desc.replace(new RegExp('('+VARIANTS.join('|')+')。?$'),'').replace(/。$/,'');s.desc=base+VARIANTS[Math.floor(Math.random()*VARIANTS.length)]+'。';
     s.scale=SCALES[Math.floor(Math.random()*5)];s.cam=CAMS[Math.floor(Math.random()*CAMS.length)];s.mood=Object.keys(MOODS)[Math.floor(Math.random()*5)];s.seed=rseed();shotEdited(s);touch(DRAMA);renderShots();toast(`已重写镜头 ${pad2(i+1)}`)}
 };
@@ -796,10 +819,12 @@ function kfRender(proj){if(DRAMA===proj&&proj.state.step===3)onFrame('kf',render
 function startKf(proj,shots,kind,extra={}){
   const cost=shots.length*(kind==='inpaint'?PRICING.inpaint:PRICING.keyframe);if(!spend(proj,cost))return false;
   const jobName={new:'绘制中',redraw:'重画中',inpaint:'局部重绘中'}[kind];
-  shots.forEach(s=>{s.kfPrev=s.kf==='run'?s.kfPrev:s.kf;s.kf='run';s.kp=0;s.kfJob=jobName;s.video='none';delete s.videoUrl});const unit=kind==='inpaint'?PRICING.inpaint:PRICING.keyframe;
+  const unit=kind==='inpaint'?PRICING.inpaint:PRICING.keyframe;
+  shots.forEach(s=>{s.kfPrev=s.kf==='run'?s.kfPrev:s.kf;s.kf='run';s.kp=0;s.kfJob=jobName;s.kfPaid=unit;s.video='none';delete s.videoUrl});
   const q=[...shots];let active=0;
   const next=()=>{while(active<3&&q.length){const s=q.shift();active++;
     API.generateKeyframe({shot:s,prompt:s.prompt||defaultPrompt(s),region:kind==='inpaint'?extra.region:null,note:extra.note||''},p=>{s.kp=p*100;kfRender(proj)}).then(r=>{
+      delete s.kfPaid;
       if(r.error){s.kf=s.kfPrev||'none';delete s.kfPrev;delete s.kfJob;refund(proj,unit);toast('关键帧生成失败，已退回积分：'+r.error);active--;kfRender(proj);if(!q.length&&!active)touch(proj);else next();return}
       if(kind==='inpaint')(s.patches=s.patches||[]).push({...extra.region,seed:r.seed,url:r.url,note:extra.note||''});else{s.seed=r.seed;s.kfUrl=r.url;s.patches=[]}
       s.kfVer=(s.kfVer||0)+1;s.kf='ready';delete s.kfPrev;delete s.kfJob;active--;kfRender(proj);
@@ -911,12 +936,13 @@ $('#vModel').onclick=e=>{const b=e.target.closest('.vm');if(!b||b.disabled)retur
 $('#genVideo').onclick=()=>{
   const proj=DRAMA,m=vModel(),todo=playList().filter(s=>s.video!=='done');if(!todo.length)return;
   const cost=videoCost(todo,m);if(!spend(proj,cost))return;
-  todo.forEach(s=>{s.video='wait';s.p=0});
+  todo.forEach(s=>{s.video='wait';s.p=0;s.vPaid=shotVCost(s,m);s.vRun=m;delete s.vTask});touch(proj);
   const rer=()=>{if(DRAMA===proj&&proj.state.step===4)onFrame('studio',renderStudio)};
   const q=[...todo];let active=0,failed=0,back=0,lastErr='';
   const next=()=>{while(active<2&&q.length){const s=q.shift();active++;s.video='run';
-    API.generateVideo(s,m,p=>{s.p=p*100;rer()}).then(r=>{
-      if(r&&r.error){s.video='none';s.p=0;failed++;const c=shotVCost(s,m);back+=c;refund(proj,c);lastErr=r.error}
+    API.generateVideo(s,m,p=>{s.p=p*100;rer()},()=>touch(proj)).then(r=>{
+      const c=s.vPaid??shotVCost(s,m);delete s.vPaid;delete s.vTask;delete s.vRun;
+      if(r&&r.error){s.video='none';s.p=0;failed++;back+=c;refund(proj,c);lastErr=r.error}
       else{s.video=s.kf==='ok'?'done':'none';s.p=100;s.vModel=m;if(r&&r.url)s.videoUrl=r.url}
       active--;rer();
       if(!q.length&&!active){touch(proj);const ok=todo.length-failed;
@@ -925,6 +951,21 @@ $('#genVideo').onclick=()=>{
       else next()})}};
   next();rer();
 };
+// 刷新或关闭页面时还在跑的视频任务：后端还在生成，接着查进度
+function resumeVideos(proj,shots){
+  const rer=()=>{if(DRAMA===proj&&proj.state.step===4)onFrame('studio',renderStudio)};
+  let left=shots.length,ok=0,back=0,lastErr='';
+  shots.forEach(s=>{const m=s.vRun==='kling'?'kling':'seedance';s.video='run';s.p=s.p||0;
+    API.pollVideo(s.vTask,m,p=>{s.p=p*100;rer()},s.vAt||Date.now()).then(r=>{
+      const c=s.vPaid||0;delete s.vPaid;delete s.vTask;delete s.vRun;
+      if(r.error){s.video='none';s.p=0;back+=c;refund(proj,c);lastErr=r.error}
+      else{s.video=s.kf==='ok'?'done':'none';s.p=100;s.vModel=m;s.videoUrl=r.url;ok++}
+      rer();
+      if(!--left){touch(proj);if(ok)logHistory(proj,`生成视频 ${ok} 镜`,`续查未完成任务 · ${proj.state.title}`,0);
+        toast(back?`有 ${shots.length-ok} 个镜头生成失败，已退回 ${num(back)} 积分：${lastErr}`:`「${proj.name}」未完成的 ${ok} 个视频已生成`)}
+    })});
+  rer();toast(`「${proj.name}」有 ${shots.length} 个视频任务还在生成，正在继续查询`);
+}
 $('#exportVideo').onclick=async()=>{
   const L=playList();if(!LIVE.on||!L.every(s=>s.videoUrl)){toast('演示模式不能导出。部署后端并接入视频模型后，可导出 MP4 成片');return}
   const b=$('#exportVideo');b.disabled=true;b.textContent='合成中…';
@@ -940,7 +981,20 @@ function newProject(kind,o={}){
     state:kind==='shop'?newShopState(!!o.sample):newDramaState()};
   APP.projects.unshift(p);return p;
 }
-function prep(p){if(!p.unpacked){p.state=p.kind==='shop'?unpackShop(p.state):unpackDrama(p.state);p.unpacked=true}return p}
+function prep(p){if(!p.unpacked){p.state=p.kind==='shop'?unpackShop(p.state):unpackDrama(p.state);p.unpacked=true;recoverInterrupted(p)}return p}
+/* 上次关页面时还没完成的任务：已提交到后端的视频接着查，其余（没拿到结果的图片、关键帧、排队中的视频）退回积分 */
+function recoverInterrupted(p){
+  const st=p.state;let back=0;const resume=[];
+  if(p.kind==='shop'){back+=st.pendingCost||0;st.pendingCost=0}
+  else (st.shots||[]).forEach(s=>{
+    if(s.kf==='run'){back+=s.kfPaid||0;s.kf=s.kfPrev||'none';delete s.kfPrev;delete s.kfJob;delete s.kfPaid}
+    if(s.video==='run'&&s.vTask&&LIVE.on)resume.push(s);
+    else if(s.video==='run'||s.video==='wait'){back+=s.vPaid||0;s.video='none';s.p=0;delete s.vTask;delete s.vPaid;delete s.vRun}
+  });
+  if(back>0){refund(p,back);toast(`「${p.name}」上次有未完成的生成任务，已退回 ${num(back)} 积分`)}
+  if(back>0||resume.length)touch(p);
+  if(resume.length)setTimeout(()=>resumeVideos(p,resume),0);
+}
 function openProject(p){
   if(!p)return;stopPlay();prep(p);
   if(p.kind==='shop'){SHOP=p;CANV.clear();renderShopAll();setView('shop')}else{DRAMA=p;renderDramaAll();setView('drama')}

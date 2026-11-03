@@ -1,4 +1,4 @@
-// 绘影 Huiying 后端：托管前端页面 + 代理模型接口（密钥只放在服务器上）
+// 帧间 Zhenjian 后端：托管前端页面 + 代理模型接口（密钥只放在服务器上）
 // 运行：node server/index.mjs   （Node 18+，无第三方依赖）
 import http from 'node:http';
 import fs from 'node:fs';
@@ -51,13 +51,23 @@ async function readJson(req, limit = 40 * 1024 * 1024) {
   for await (const c of req) { size += c.length; if (size > limit) throw new HttpError(413, '请求太大'); chunks.push(c); }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { throw new HttpError(400, '请求格式不是 JSON'); }
 }
+const SAFE_HEADERS = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'same-origin' };
 function send(res, status, body) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.writeHead(status, { ...SAFE_HEADERS, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(JSON.stringify(body));
 }
+// 口令比较用定长时间，避免按响应时间逐位猜口令
+function tokenOk(got) {
+  const a = Buffer.from(String(got || '')), b = Buffer.from(CFG.accessToken);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+const UPSTREAM_TIMEOUT = +(process.env.UPSTREAM_TIMEOUT_MS || 180000);
 async function upstream(url, opt, label) {
   let r;
-  try { r = await fetch(url, opt); } catch (e) { throw new HttpError(502, `${label} 连接失败：${e.message}`); }
+  try { r = await fetch(url, { ...opt, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT) }); } catch (e) {
+    if (e.name === 'TimeoutError') throw new HttpError(504, `${label} 响应超时，请稍后重试`);
+    throw new HttpError(502, `${label} 连接失败：${e.message}`);
+  }
   const text = await r.text(); let j; try { j = JSON.parse(text); } catch { j = { raw: text.slice(0, 500) }; }
   if (!r.ok || (j && j.error)) {
     const msg = j?.error?.message || j?.message || j?.raw || r.statusText;
@@ -68,7 +78,9 @@ async function upstream(url, opt, label) {
 async function saveFile(buf, ext) { const name = newId() + '.' + ext; await fsp.writeFile(path.join(FILES, name), buf); return '/files/' + name; }
 function extOf(buf) { return buf[0] === 0x89 ? 'png' : buf[0] === 0xff ? 'jpg' : buf.slice(8, 12).toString() === 'WEBP' ? 'webp' : 'png'; }
 async function download(url, ext) {
-  const r = await fetch(url); if (!r.ok) throw new HttpError(502, '下载生成结果失败');
+  let r;
+  try { r = await fetch(url, { signal: AbortSignal.timeout(UPSTREAM_TIMEOUT) }); } catch (e) { throw new HttpError(502, '下载生成结果失败：' + e.message); }
+  if (!r.ok) throw new HttpError(502, '下载生成结果失败（' + r.status + '）');
   const buf = Buffer.from(await r.arrayBuffer()); return saveFile(buf, ext || extOf(buf));
 }
 // 前端传来的图片：data URI 原样转发；/files/xxx 读本地文件转成 data URI
@@ -86,7 +98,7 @@ async function toDataUri(src) {
 
 /* ---------------- 生图：Seedream 4.0 ---------------- */
 // Seedream 4.0 要求总像素在 1280×720 ~ 4096×4096 之间。先按目标比例生成高清图，前端再精确裁成目标尺寸。
-function seedreamSize(w, h) {
+export function seedreamSize(w, h) {
   const area = w * h, lo = 1280 * 720, hi = 2048 * 2048, target = Math.min(hi, Math.max(lo * 1.1, area));
   let k = Math.sqrt(target / area), W = Math.round(w * k), H = Math.round(h * k);
   const r = W / H; if (r > 16) H = Math.ceil(W / 16); if (r < 1 / 16) W = Math.ceil(H / 16);
@@ -107,40 +119,71 @@ async function genImage({ prompt, images = [], width = 1024, height = 1024 }) {
 }
 
 /* ---------------- 分镜脚本：DeepSeek V4.1 Flash ---------------- */
-async function genStoryboard({ story, enums }) {
-  need(CFG.llmKey, '分镜模型密钥（ARK_API_KEY 或 DEEPSEEK_API_KEY）');
-  const s = story || {}; const E = enums || {};
+const SB_SYS = '你是短剧分镜编剧。只输出 JSON，不要任何解释或 Markdown。';
+function storyBrief(s) {
   const chars = (s.chars || []).map((c, i) => `${i}. ${c.name}（${[c.role, c.look].filter(Boolean).join('，')}）`).join('\n') || '（无）';
-  const sys = '你是短剧分镜编剧。只输出 JSON，不要任何解释或 Markdown。';
+  return `类型：${s.genre || ''}\n片名：${s.title || ''}\n梗概：${s.syn || ''}\n角色（序号. 名字）：\n${chars}`;
+}
+function shotRules(E) {
   const moodList = (E.moods || []).map(k => (E.moodNames && E.moodNames[k] ? `${k}（${E.moodNames[k]}）` : k)).join('/');
-  const user = `为一部${s.len || 30}秒的${s.ratio === '16:9' ? '横屏' : '竖屏'}短剧写分镜脚本，正好 ${s.nShots || 8} 个镜头，镜头时长之和约等于总时长。
-类型：${s.genre || ''}
-片名：${s.title || ''}
-梗概：${s.syn || ''}
-角色（序号. 名字）：
-${chars}
-
-输出格式：{"shots":[{"scale":"景别","mood":"光线","cam":"运镜","desc":"画面描述，一两句，写清人物动作和环境","line":"台词或旁白，没有就空字符串","dur":秒数,"cast":[出镜角色序号]}]}
-取值限制：scale 只能是 ${(E.scales || []).join('/')}；mood 只能是 ${moodList}（填括号前的英文）；cam 只能是 ${(E.cams || []).join('/')}；dur 为 2~8 的整数；cast 为上面角色序号组成的数组，最多 3 个。
-要求：开头 3 秒内要有钩子，结尾留悬念；台词口语化，每句不超过 20 字。`;
-  const j = await upstream(CFG.llmBase + '/chat/completions', {
-    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.llmKey },
-    body: JSON.stringify({ model: CFG.llmModel, temperature: 0.8, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }] }),
-  }, 'DeepSeek');
-  const text = j.choices?.[0]?.message?.content || '';
-  const m = text.match(/\{[\s\S]*\}/); let out;
-  try { out = JSON.parse(m ? m[0] : text); } catch { throw new HttpError(502, '分镜模型返回的不是合法 JSON，请重试'); }
+  return `取值限制：scale 只能是 ${(E.scales || []).join('/')}；mood 只能是 ${moodList}（填括号前的英文）；cam 只能是 ${(E.cams || []).join('/')}；dur 为 2~8 的整数；cast 为上面角色序号组成的数组，最多 3 个。`;
+}
+const SHOT_FMT = '{"scale":"景别","mood":"光线","cam":"运镜","desc":"画面描述，一两句，写清人物动作和环境","line":"台词或旁白，没有就空字符串","dur":秒数,"cast":[出镜角色序号]}';
+// 模型输出不一定守规矩：取值不在枚举里就用默认值，长度和时长都截断到合理范围
+export function normalizeShot(x, E = {}, nChars = 0) {
+  x = x || {};
   const pick = (v, list, d) => (list && list.includes(v) ? v : d);
-  const shots = (out.shots || []).slice(0, 30).map(x => ({
-    scale: pick(x.scale, E.scales, (E.scales || ['中景'])[2] || '中景'),
-    mood: pick(x.mood, E.moods, (E.moods || ['night'])[0]),
-    cam: pick(x.cam, E.cams, (E.cams || ['固定'])[0]),
+  return {
+    scale: pick(x.scale, E.scales, (E.scales || [])[2] || '中景'),
+    mood: pick(x.mood, E.moods, (E.moods || [])[0] || 'night'),
+    cam: pick(x.cam, E.cams, (E.cams || [])[0] || '固定'),
     desc: String(x.desc || '').slice(0, 200), line: String(x.line || '').slice(0, 60),
     dur: Math.max(2, Math.min(8, Math.round(+x.dur || 3))),
-    cast: (Array.isArray(x.cast) ? x.cast : []).map(Number).filter(i => Number.isInteger(i) && i >= 0 && i < (s.chars || []).length).slice(0, 3),
-  }));
+    cast: [...new Set((Array.isArray(x.cast) ? x.cast : []).map(Number))].filter(i => Number.isInteger(i) && i >= 0 && i < nChars).slice(0, 3),
+  };
+}
+export function parseJsonReply(text) {
+  const m = String(text || '').match(/\{[\s\S]*\}/);
+  try { return JSON.parse(m ? m[0] : text); } catch { throw new HttpError(502, '分镜模型返回的不是合法 JSON，请重试'); }
+}
+async function chat(user, temperature = 0.8) {
+  need(CFG.llmKey, '分镜模型密钥（ARK_API_KEY 或 DEEPSEEK_API_KEY）');
+  const j = await upstream(CFG.llmBase + '/chat/completions', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.llmKey },
+    body: JSON.stringify({ model: CFG.llmModel, temperature, messages: [{ role: 'system', content: SB_SYS }, { role: 'user', content: user }] }),
+  }, 'DeepSeek');
+  return { out: parseJsonReply(j.choices?.[0]?.message?.content), usage: j.usage };
+}
+async function genStoryboard({ story, enums }) {
+  const s = story || {}, E = enums || {};
+  const user = `为一部${s.len || 30}秒的${s.ratio === '16:9' ? '横屏' : '竖屏'}短剧写分镜脚本，正好 ${s.nShots || 8} 个镜头，镜头时长之和约等于总时长。
+${storyBrief(s)}
+
+输出格式：{"shots":[${SHOT_FMT}]}
+${shotRules(E)}
+要求：开头 3 秒内要有钩子，结尾留悬念；台词口语化，每句不超过 20 字。`;
+  const { out, usage } = await chat(user);
+  const shots = (out.shots || []).slice(0, 30).map(x => normalizeShot(x, E, (s.chars || []).length));
   if (!shots.length) throw new HttpError(502, '分镜模型没有返回镜头，请重试');
-  return { shots, usage: j.usage, model: CFG.llmModel };
+  return { shots, usage, model: CFG.llmModel };
+}
+// 重写单个镜头：带上前后镜头作为上下文，保证剧情连贯
+async function rewriteShot({ story, enums, shots, index, note }) {
+  const s = story || {}, E = enums || {}, list = (Array.isArray(shots) ? shots.slice(0, 30) : []).map(x => (x && typeof x === 'object' ? x : {}));
+  const i = Math.round(+index);
+  if (!(i >= 0 && i < list.length)) throw new HttpError(400, '镜头序号不正确');
+  const ctx = list.map((x, k) => `${k + 1}. [${x.scale || ''}/${x.cam || ''}/${x.dur || 3}秒] ${String(x.desc || '').slice(0, 120)}${x.line ? ' 台词：' + String(x.line).slice(0, 40) : ''}${k === i ? '  ← 需要重写' : ''}`).join('\n');
+  const user = `下面是一部${s.ratio === '16:9' ? '横屏' : '竖屏'}短剧的分镜脚本，请只重写第 ${i + 1} 个镜头：换一种更有张力的拍法（景别、运镜、光线可以变），剧情要和前后镜头衔接，时长保持在 ${list[i].dur || 3} 秒左右。${note ? '\n额外要求：' + String(note).slice(0, 200) : ''}
+${storyBrief(s)}
+
+当前分镜：
+${ctx}
+
+输出格式：{"shot":${SHOT_FMT}}
+${shotRules(E)}`;
+  const { out, usage } = await chat(user, 0.9);
+  if (!out.shot || !out.shot.desc) throw new HttpError(502, '分镜模型没有返回镜头，请重试');
+  return { shot: normalizeShot(out.shot, E, (s.chars || []).length), usage, model: CFG.llmModel };
 }
 
 /* ---------------- 视频：Seedance 2.0 mini / 可灵 2.5 Turbo ---------------- */
@@ -152,7 +195,9 @@ function klingJwt() {
 }
 const TASKS = new Map(); // 本地任务 id → {provider, upstreamId, url?}
 const tasksFile = path.join(CFG.dataDir, 'tasks.json');
-try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(tasksFile, 'utf8')))) TASKS.set(k, v); } catch {}
+// 只保留 7 天内的任务记录：上游的任务结果本来也只保存几天
+const TASK_TTL = 7 * 24 * 3600 * 1000;
+try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(tasksFile, 'utf8')))) if (Date.now() - (v.at || 0) < TASK_TTL) TASKS.set(k, v); } catch {}
 const saveTasks = () => fsp.writeFile(tasksFile, JSON.stringify(Object.fromEntries(TASKS))).catch(() => {});
 
 async function createVideo({ provider = 'seedance', image, prompt = '', duration = 5, ratio = '9:16' }) {
@@ -226,41 +271,59 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=u
 async function serveStatic(req, res, file) {
   const st = await fsp.stat(file).catch(() => null); if (!st || !st.isFile()) { res.writeHead(404); res.end('Not found'); return; }
   const type = MIME[path.extname(file)] || 'application/octet-stream', range = req.headers.range;
-  if (range && type === 'video/mp4') { // 视频拖动进度需要 Range
-    const [a, b] = range.replace('bytes=', '').split('-'); const start = +a || 0, end = b ? +b : st.size - 1;
-    res.writeHead(206, { 'content-type': type, 'content-range': `bytes ${start}-${end}/${st.size}`, 'accept-ranges': 'bytes', 'content-length': end - start + 1 });
-    fs.createReadStream(file, { start, end }).pipe(res); return;
+  const head = { ...SAFE_HEADERS, 'content-type': type, 'accept-ranges': 'bytes', 'cache-control': file.startsWith(FILES) ? 'public, max-age=31536000, immutable' : 'no-cache' };
+  if (range) { // 视频拖动进度需要 Range
+    const r = parseRange(range, st.size);
+    if (!r) { res.writeHead(416, { ...head, 'content-range': `bytes */${st.size}` }); res.end(); return; }
+    res.writeHead(206, { ...head, 'content-range': `bytes ${r.start}-${r.end}/${st.size}`, 'content-length': r.end - r.start + 1 });
+    if (req.method === 'HEAD') { res.end(); return; }
+    fs.createReadStream(file, { start: r.start, end: r.end }).pipe(res); return;
   }
-  res.writeHead(200, { 'content-type': type, 'content-length': st.size, 'cache-control': file.startsWith(FILES) ? 'public, max-age=31536000, immutable' : 'no-cache' });
+  res.writeHead(200, { ...head, 'content-length': st.size });
+  if (req.method === 'HEAD') { res.end(); return; }
   fs.createReadStream(file).pipe(res);
+}
+// 支持 bytes=a-b、bytes=a-、bytes=-n（最后 n 字节）；越界返回 null（416）
+export function parseRange(h, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(h).trim()); if (!m || (!m[1] && !m[2]) || size <= 0) return null;
+  let start, end;
+  if (!m[1]) { start = Math.max(0, size - +m[2]); end = size - 1; }
+  else { start = +m[1]; end = m[2] ? Math.min(+m[2], size - 1) : size - 1; }
+  return start <= end && start < size ? { start, end } : null;
 }
 const STATIC = new Set(['/index.html', '/styles.css', '/app.js']);
 
-const server = http.createServer(async (req, res) => {
+export const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x'); const p = url.pathname;
   try {
     if (p.startsWith('/api/')) {
-      if (CFG.accessToken && p !== '/api/health' && req.headers['x-access-token'] !== CFG.accessToken) throw new HttpError(401, '需要访问口令');
+      if (CFG.accessToken && p !== '/api/health' && !tokenOk(req.headers['x-access-token'])) throw new HttpError(401, '需要访问口令');
       if (p === '/api/health') return send(res, 200, {
         ok: true, auth: !!CFG.accessToken, ffmpeg: HAS_FFMPEG,
         models: { image: !!CFG.arkKey && CFG.imageModel, llm: !!CFG.llmKey && CFG.llmModel, seedance: !!CFG.arkKey && CFG.seedanceModel, kling: !!(CFG.klingAk && CFG.klingSk) && CFG.klingModel },
       });
       if (req.method === 'POST' && p === '/api/image') return send(res, 200, await genImage(await readJson(req)));
       if (req.method === 'POST' && p === '/api/storyboard') return send(res, 200, await genStoryboard(await readJson(req)));
+      if (req.method === 'POST' && p === '/api/shot') return send(res, 200, await rewriteShot(await readJson(req)));
       if (req.method === 'POST' && p === '/api/video') return send(res, 200, await createVideo(await readJson(req)));
       if (req.method === 'GET' && p.startsWith('/api/video/')) return send(res, 200, await queryVideo(p.slice(11)));
       if (req.method === 'POST' && p === '/api/concat') return send(res, 200, await concatVideos(await readJson(req)));
       throw new HttpError(404, '接口不存在');
     }
     if (p.startsWith('/files/')) return serveStatic(req, res, path.join(FILES, path.basename(p)));
+    // 带扩展名或以点开头、但不在白名单里的（如 /favicon.ico、/.env）一律 404，其余路径回落到首页
+    if (!STATIC.has(p) && (path.extname(p) || path.basename(p).startsWith('.'))) { res.writeHead(404, SAFE_HEADERS); res.end('Not found'); return; }
     return serveStatic(req, res, path.join(ROOT, STATIC.has(p) ? p : '/index.html'));
   } catch (e) {
     const status = e.status || 500; if (status >= 500) console.error(p, e.message);
     send(res, status, { error: e.message || '服务器错误' });
   }
 });
-server.listen(CFG.port, () => {
-  console.log(`绘影已启动：http://localhost:${CFG.port}`);
+// 直接运行时才监听端口；测试里 import 这个文件时不自动启动
+const realpath = f => { try { return fs.realpathSync(f); } catch { return path.resolve(f); } };
+const isMain = !!process.argv[1] && realpath(process.argv[1]) === realpath(fileURLToPath(import.meta.url));
+if (isMain) server.listen(CFG.port, () => {
+  console.log(`帧间已启动：http://localhost:${CFG.port}`);
   console.log(`  火山方舟（Seedream / DeepSeek / Seedance）：${CFG.arkKey ? '已配置' : '未配置 ARK_API_KEY'}`);
   console.log(`  分镜模型：${CFG.llmKey ? CFG.llmModel + ' @ ' + CFG.llmBase : '未配置'}`);
   console.log(`  可灵 2.5 Turbo：${CFG.klingAk && CFG.klingSk ? '已配置' : '未配置（精品档不可用）'}`);

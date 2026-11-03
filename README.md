@@ -1,6 +1,6 @@
-# 绘影 Huiying
+# 帧间 Zhenjian
 
-**绘**图，成**影**。面向电商和短剧团队的 AI 视觉创作工作台，包含两个模块：
+一帧一帧，连成故事。面向电商和短剧团队的 AI 视觉创作工作台，包含两个模块：
 
 - **电商图片**：批量导入 SKU，按套图方案为每个商品一次生成白底图、主图、场景图，支持按平台批量改尺寸、批量换风格。
 - **短剧生成**：故事设定 + 角色卡 → 分镜脚本 → 关键帧确认 → 逐镜生成视频，合成 MP4 成片。
@@ -10,7 +10,7 @@
 | 环节 | 模型 | 平台 | 参考成本 | 本产品定价 |
 | --- | --- | --- | --- | --- |
 | 电商图、关键帧、局部重绘 | **Seedream 4.0**（20260415 版） | 火山方舟 | 0.20 元/张 | 4 积分/张 |
-| 分镜脚本 | **DeepSeek V4.1 Flash** | 火山方舟 | 输入 1–2 元 / 输出 4–8 元（每百万 tokens，工作日高峰时段贵一倍），一次分镜不到 0.01 元 | 2 积分/次 |
+| 分镜脚本 | **DeepSeek V4.1 Flash** | 火山方舟 | 输入 1–2 元 / 输出 4–8 元（每百万 tokens，工作日高峰时段贵一倍），一次分镜不到 0.01 元 | 2 积分/次，重写单镜 1 积分 |
 | 视频 · 标准档（默认） | **Seedance 2.0 mini** 720p | 火山方舟 | 0.5 元/秒，单条 4–15 秒 | 10 积分/秒 |
 | 视频 · 精品档 | **可灵 2.5 Turbo** 1080p | 可灵开放平台 | 约 2.5 元/5 秒 | 50 积分/5 秒 |
 
@@ -41,6 +41,23 @@ npm start                 # 默认 http://localhost:8787
 
 后端没有第三方依赖，不需要 `npm install`。
 
+### 用 Docker 部署
+
+镜像里已经装好 ffmpeg，生成的文件保存在挂载的 `data` 目录：
+
+```bash
+docker build -t zhenjian .
+docker run -d -p 8787:8787 --env-file .env -v "$PWD/data:/data" zhenjian
+```
+
+### 运行测试
+
+```bash
+npm test
+```
+
+测试会启动一个本地假上游来模拟火山方舟，不需要密钥，也不会消耗额度。
+
 ### 填写 .env
 
 1. **火山方舟**：在 [火山方舟控制台](https://console.volcengine.com/ark) 创建 API Key，填到 `ARK_API_KEY`。在「开通管理」里开通 Seedream 4.0、DeepSeek V4.1 Flash、Seedance 2.0 mini。
@@ -58,6 +75,7 @@ npm start                 # 默认 http://localhost:8787
 | `GET /api/health` | 检测后端和各模型是否已配置 | — |
 | `POST /api/image` | `{prompt, images[], width, height}` → `{url}` | Seedream 4.0 `images/generations` |
 | `POST /api/storyboard` | `{story, enums}` → `{shots}` | DeepSeek V4.1 Flash `chat/completions` |
+| `POST /api/shot` | `{story, enums, shots, index}` → `{shot}`，重写单个镜头 | 同上 |
 | `POST /api/video` | `{provider: seedance\|kling, image, prompt, duration}` → `{id}` | Seedance `contents/generations/tasks` / 可灵 `v1/videos/image2video` |
 | `GET /api/video/:id` | 查询任务进度，完成后返回 `{url}` | 同上 |
 | `POST /api/concat` | `{urls, durs}` → 合成后的 `{url}` | 本地 ffmpeg |
@@ -70,6 +88,8 @@ npm start                 # 默认 http://localhost:8787
 - **局部重绘**：把当前关键帧作为参考图整张重画，再只把框选区域贴回原图，其他部分保持不变。
 - **视频**：已确认的关键帧作为首帧做图生视频。Seedance 2.0 mini 支持 4–15 秒，短于 4 秒的镜头按 4 秒生成和计费。可灵只支持 5 秒和 10 秒，按 5 秒为单位计费；镜头短于成片时长时，合成时会裁到分镜时长。
 - **失败处理**：生成失败的任务会自动退回积分，并提示失败原因。
+- **中途刷新页面**：已经提交的视频任务会记在项目里，重新打开项目后接着查进度；还没拿到结果的图片、关键帧和排队中的视频会退回积分。
+- **超时**：调用模型接口默认 3 分钟超时（`UPSTREAM_TIMEOUT_MS` 可改），超时会返回 504 并退回积分。
 
 ## 功能一览
 
@@ -84,7 +104,7 @@ npm start                 # 默认 http://localhost:8787
 - 题材示例（都市逆袭、甜宠、悬疑），单集时长与镜头数可调
 - 画面比例 9:16 / 16:9，画风（写实 / 电影感 / 动漫）
 - 角色卡：姓名、身份、外形、主色、参考图
-- 分镜可逐镜编辑景别、运镜、光线、时长、画面描述、台词
+- 分镜可逐镜编辑景别、运镜、光线、时长、画面描述、台词；正式模式下「重写此镜」会结合前后镜头让模型重写
 - 关键帧确认：确认 / 重画 / 改提示词重画 / 框选区域局部重绘；只有确认过的镜头会进入视频生成
 - 视频模型二选一（Seedance 标准档 / 可灵精品档），生成队列并发 2，时间轴预览，导出 MP4
 
@@ -111,6 +131,8 @@ npm start                 # 默认 http://localhost:8787
 ├── styles.css        样式（明暗两套主题）
 ├── app.js            前端逻辑：模型调用、存储、电商模块、短剧模块、项目与历史
 ├── server/index.mjs  后端：托管页面 + 代理模型接口 + 保存生成结果 + 合成成片
+├── test/             后端测试（npm test）
+├── Dockerfile        正式模式镜像（含 ffmpeg）
 ├── .env.example      配置模板
 └── package.json
 ```
