@@ -421,7 +421,7 @@ function renderPlan(){
   const p=sh().plan;
   $('#typeChips').innerHTML=Object.entries(TYPES).map(([k,v])=>`<button type="button" class="chip" data-v="${k}" aria-pressed="${p.types.includes(k)}">${v}</button>`).join('');
   fillStyleGrid($('#styleGrid'),p.style);
-  $('#sizeChips').innerHTML=allSizeKeys().map(k=>{const s=size(k),cu=!SIZES[k];return `<button type="button" class="chip" data-v="${k}" aria-pressed="${p.sizes.includes(k)}" title="${s.w}×${s.h}">${ratioGlyph(k)}${esc(s.label)}${cu?' <span class="mono" style="font-size:11px;opacity:.7">'+s.w+'×'+s.h+'</span><span class="x" data-rm="'+k+'" aria-label="删除这个尺寸">×</span>':''}</button>`}).join('');
+  $('#sizeChips').innerHTML=allSizeKeys().map(k=>{const s=size(k),cu=!SIZES[k];return `<button type="button" class="chip" data-v="${k}" aria-pressed="${p.sizes.includes(k)}" title="${s.w}×${s.h}">${ratioGlyph(k)}${esc(s.label)}<span class="mono dim">${s.w}×${s.h}</span>${cu?'<span class="x" data-rm="'+k+'" aria-label="删除这个尺寸">×</span>':''}</button>`}).join('');
   $('#perVal').textContent=p.per;
   const n=sh().skus.filter(s=>s.on).length,each=p.types.length*p.sizes.length*p.per,jobs=planJobs(),cost=jobs.reduce((a,j)=>a+priceImage(j.size),0);
   $('#planSum').innerHTML=n&&each?`<span><b>${n}</b> 个 SKU × 每套 <b>${each}</b> 张（${p.types.length} 类型 × ${p.sizes.length} 尺寸 × ${p.per}）= 共 <b>${jobs.length}</b> 张</span>${estHtml(cost)}<span class="hint">每张 ${PRICING.image} 积分</span>`:'<span class="hint">请至少勾选一个 SKU、一种类型和一个尺寸</span>';

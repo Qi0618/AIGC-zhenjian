@@ -121,6 +121,7 @@ textarea{resize:vertical;min-height:72px;line-height:1.6}
 .chip:hover{border-color:var(--line-2);color:var(--ink)}
 .chip[aria-pressed="true"]{background:var(--chip-on);color:var(--chip-on-ink);border-color:var(--chip-on);font-weight:500}
 .chip .x{opacity:.6;margin-left:2px}
+.chip .dim{font-size:11px;opacity:.6;letter-spacing:0;font-variant-numeric:tabular-nums}
 .chip .sw{width:10px;height:10px;border-radius:50%}
 .seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;background:var(--raise);border:1px solid var(--line);border-radius:12px;padding:3px;gap:3px}
 .seg button{border:0;background:none;border-radius:9px;padding:7px 4px;cursor:pointer;color:var(--mute);font-size:13px;transition:background .15s,color .15s}
