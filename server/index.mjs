@@ -1,0 +1,264 @@
+// 绘影 Huiying 后端：托管前端页面 + 代理模型接口（密钥只放在服务器上）
+// 运行：node server/index.mjs   （Node 18+，无第三方依赖）
+import http from 'node:http';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+loadEnv(path.join(ROOT, '.env'));
+
+const CFG = {
+  port: +(process.env.PORT || 8787),
+  arkKey: process.env.ARK_API_KEY || '',
+  arkBase: (process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/$/, ''),
+  imageModel: process.env.ARK_IMAGE_MODEL || 'doubao-seedream-4-0-250828',
+  llmModel: process.env.ARK_LLM_MODEL || 'deepseek-v3-1-250821',
+  seedanceModel: process.env.ARK_VIDEO_MODEL || 'doubao-seedance-1-0-pro-fast-251015',
+  seedanceRes: process.env.ARK_VIDEO_RESOLUTION || '720p',
+  klingAk: process.env.KLING_ACCESS_KEY || '',
+  klingSk: process.env.KLING_SECRET_KEY || '',
+  klingBase: (process.env.KLING_BASE_URL || 'https://api-beijing.klingai.com').replace(/\/$/, ''),
+  klingModel: process.env.KLING_MODEL || 'kling-v2-5-turbo',
+  klingMode: process.env.KLING_MODE || 'pro', // pro = 1080p
+  accessToken: process.env.ACCESS_TOKEN || '',
+  dataDir: path.resolve(ROOT, process.env.DATA_DIR || 'data'),
+};
+const FILES = path.join(CFG.dataDir, 'files');
+fs.mkdirSync(FILES, { recursive: true });
+const HAS_FFMPEG = spawnSync('ffmpeg', ['-version']).status === 0;
+
+/* ---------------- 小工具 ---------------- */
+function loadEnv(f) {
+  if (!fs.existsSync(f)) return;
+  for (const line of fs.readFileSync(f, 'utf8').split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+    if (m && !(m[1] in process.env)) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+  }
+}
+class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
+const need = (ok, what) => { if (!ok) throw new HttpError(503, `${what} 未配置，请在 .env 里填写后重启服务`); };
+const newId = () => Date.now().toString(36) + crypto.randomBytes(5).toString('hex');
+
+async function readJson(req, limit = 40 * 1024 * 1024) {
+  let size = 0; const chunks = [];
+  for await (const c of req) { size += c.length; if (size > limit) throw new HttpError(413, '请求太大'); chunks.push(c); }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { throw new HttpError(400, '请求格式不是 JSON'); }
+}
+function send(res, status, body) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+async function upstream(url, opt, label) {
+  let r;
+  try { r = await fetch(url, opt); } catch (e) { throw new HttpError(502, `${label} 连接失败：${e.message}`); }
+  const text = await r.text(); let j; try { j = JSON.parse(text); } catch { j = { raw: text.slice(0, 500) }; }
+  if (!r.ok || (j && j.error)) {
+    const msg = j?.error?.message || j?.message || j?.raw || r.statusText;
+    throw new HttpError(r.status >= 400 && r.status < 500 ? 400 : 502, `${label} 返回错误：${msg}`);
+  }
+  return j;
+}
+async function saveFile(buf, ext) { const name = newId() + '.' + ext; await fsp.writeFile(path.join(FILES, name), buf); return '/files/' + name; }
+function extOf(buf) { return buf[0] === 0x89 ? 'png' : buf[0] === 0xff ? 'jpg' : buf.slice(8, 12).toString() === 'WEBP' ? 'webp' : 'png'; }
+async function download(url, ext) {
+  const r = await fetch(url); if (!r.ok) throw new HttpError(502, '下载生成结果失败');
+  const buf = Buffer.from(await r.arrayBuffer()); return saveFile(buf, ext || extOf(buf));
+}
+// 前端传来的图片：data URI 原样转发；/files/xxx 读本地文件转成 data URI
+async function toDataUri(src) {
+  if (!src) return null;
+  if (src.startsWith('data:')) return src;
+  if (src.startsWith('/files/')) {
+    const f = path.join(FILES, path.basename(src)); const buf = await fsp.readFile(f).catch(() => null);
+    if (!buf) throw new HttpError(400, '参考图已不存在：' + src);
+    const ext = extOf(buf); return `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,` + buf.toString('base64');
+  }
+  if (/^https?:\/\//.test(src)) return src;
+  throw new HttpError(400, '无法识别的图片地址');
+}
+
+/* ---------------- 生图：Seedream 4.0 ---------------- */
+// Seedream 4.0 要求总像素在 1280×720 ~ 4096×4096 之间。先按目标比例生成高清图，前端再精确裁成目标尺寸。
+function seedreamSize(w, h) {
+  const area = w * h, lo = 1280 * 720, hi = 2048 * 2048, target = Math.min(hi, Math.max(lo * 1.1, area));
+  let k = Math.sqrt(target / area), W = Math.round(w * k), H = Math.round(h * k);
+  const r = W / H; if (r > 16) H = Math.ceil(W / 16); if (r < 1 / 16) W = Math.ceil(H / 16);
+  return `${W}x${H}`;
+}
+async function genImage({ prompt, images = [], width = 1024, height = 1024 }) {
+  need(CFG.arkKey, '火山方舟 ARK_API_KEY');
+  if (!prompt) throw new HttpError(400, '缺少提示词');
+  const refs = (await Promise.all(images.slice(0, 6).map(toDataUri))).filter(Boolean);
+  const body = { model: CFG.imageModel, prompt, size: seedreamSize(width, height), response_format: 'b64_json', watermark: false };
+  if (refs.length) body.image = refs.length === 1 ? refs[0] : refs;
+  const j = await upstream(CFG.arkBase + '/images/generations', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.arkKey }, body: JSON.stringify(body),
+  }, 'Seedream');
+  const d = j.data?.[0]; if (!d) throw new HttpError(502, 'Seedream 没有返回图片');
+  const url = d.b64_json ? await saveFile(Buffer.from(d.b64_json, 'base64'), 'jpg') : await download(d.url);
+  return { url, model: CFG.imageModel };
+}
+
+/* ---------------- 分镜脚本：DeepSeek V3.1 ---------------- */
+async function genStoryboard({ story, enums }) {
+  need(CFG.arkKey, '火山方舟 ARK_API_KEY');
+  const s = story || {}; const E = enums || {};
+  const chars = (s.chars || []).map((c, i) => `${i}. ${c.name}（${[c.role, c.look].filter(Boolean).join('，')}）`).join('\n') || '（无）';
+  const sys = '你是短剧分镜编剧。只输出 JSON，不要任何解释或 Markdown。';
+  const moodList = (E.moods || []).map(k => (E.moodNames && E.moodNames[k] ? `${k}（${E.moodNames[k]}）` : k)).join('/');
+  const user = `为一部${s.len || 30}秒的${s.ratio === '16:9' ? '横屏' : '竖屏'}短剧写分镜脚本，正好 ${s.nShots || 8} 个镜头，镜头时长之和约等于总时长。
+类型：${s.genre || ''}
+片名：${s.title || ''}
+梗概：${s.syn || ''}
+角色（序号. 名字）：
+${chars}
+
+输出格式：{"shots":[{"scale":"景别","mood":"光线","cam":"运镜","desc":"画面描述，一两句，写清人物动作和环境","line":"台词或旁白，没有就空字符串","dur":秒数,"cast":[出镜角色序号]}]}
+取值限制：scale 只能是 ${(E.scales || []).join('/')}；mood 只能是 ${moodList}（填括号前的英文）；cam 只能是 ${(E.cams || []).join('/')}；dur 为 2~8 的整数；cast 为上面角色序号组成的数组，最多 3 个。
+要求：开头 3 秒内要有钩子，结尾留悬念；台词口语化，每句不超过 20 字。`;
+  const j = await upstream(CFG.arkBase + '/chat/completions', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.arkKey },
+    body: JSON.stringify({ model: CFG.llmModel, temperature: 0.8, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }] }),
+  }, 'DeepSeek');
+  const text = j.choices?.[0]?.message?.content || '';
+  const m = text.match(/\{[\s\S]*\}/); let out;
+  try { out = JSON.parse(m ? m[0] : text); } catch { throw new HttpError(502, '分镜模型返回的不是合法 JSON，请重试'); }
+  const pick = (v, list, d) => (list && list.includes(v) ? v : d);
+  const shots = (out.shots || []).slice(0, 30).map(x => ({
+    scale: pick(x.scale, E.scales, (E.scales || ['中景'])[2] || '中景'),
+    mood: pick(x.mood, E.moods, (E.moods || ['night'])[0]),
+    cam: pick(x.cam, E.cams, (E.cams || ['固定'])[0]),
+    desc: String(x.desc || '').slice(0, 200), line: String(x.line || '').slice(0, 60),
+    dur: Math.max(2, Math.min(8, Math.round(+x.dur || 3))),
+    cast: (Array.isArray(x.cast) ? x.cast : []).map(Number).filter(i => Number.isInteger(i) && i >= 0 && i < (s.chars || []).length).slice(0, 3),
+  }));
+  if (!shots.length) throw new HttpError(502, '分镜模型没有返回镜头，请重试');
+  return { shots, usage: j.usage, model: CFG.llmModel };
+}
+
+/* ---------------- 视频：Seedance 1.0 pro-fast / 可灵 2.5 Turbo ---------------- */
+function klingJwt() {
+  const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url'); const now = Math.floor(Date.now() / 1000);
+  const head = b64({ alg: 'HS256', typ: 'JWT' }), body = b64({ iss: CFG.klingAk, exp: now + 1800, nbf: now - 5 });
+  const sig = crypto.createHmac('sha256', CFG.klingSk).update(head + '.' + body).digest('base64url');
+  return `${head}.${body}.${sig}`;
+}
+const TASKS = new Map(); // 本地任务 id → {provider, upstreamId, url?}
+const tasksFile = path.join(CFG.dataDir, 'tasks.json');
+try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(tasksFile, 'utf8')))) TASKS.set(k, v); } catch {}
+const saveTasks = () => fsp.writeFile(tasksFile, JSON.stringify(Object.fromEntries(TASKS))).catch(() => {});
+
+async function createVideo({ provider = 'seedance', image, prompt = '', duration = 5, ratio = '9:16' }) {
+  const img = await toDataUri(image); if (!img) throw new HttpError(400, '缺少首帧图（已确认的关键帧）');
+  let upstreamId;
+  if (provider === 'kling') {
+    need(CFG.klingAk && CFG.klingSk, '可灵 KLING_ACCESS_KEY / KLING_SECRET_KEY');
+    const dur = duration > 5 ? '10' : '5'; // 可灵只支持 5 / 10 秒
+    const j = await upstream(CFG.klingBase + '/v1/videos/image2video', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + klingJwt() },
+      body: JSON.stringify({ model_name: CFG.klingModel, mode: CFG.klingMode, image: img.replace(/^data:[^,]+,/, ''), prompt: prompt.slice(0, 2400), duration: dur }),
+    }, '可灵');
+    if (j.code && j.code !== 0) throw new HttpError(400, '可灵返回错误：' + (j.message || j.code));
+    upstreamId = j.data?.task_id;
+  } else {
+    need(CFG.arkKey, '火山方舟 ARK_API_KEY');
+    const dur = Math.max(2, Math.min(12, Math.round(duration)));
+    // 首帧图已经是目标比例，用 adaptive 让视频跟随首帧比例
+    const text = `${prompt} --resolution ${CFG.seedanceRes} --ratio adaptive --duration ${dur} --watermark false`;
+    const j = await upstream(CFG.arkBase + '/contents/generations/tasks', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.arkKey },
+      body: JSON.stringify({ model: CFG.seedanceModel, content: [{ type: 'text', text }, { type: 'image_url', image_url: { url: img }, role: 'first_frame' }] }),
+    }, 'Seedance');
+    upstreamId = j.id;
+  }
+  if (!upstreamId) throw new HttpError(502, '视频接口没有返回任务 id');
+  const id = newId(); TASKS.set(id, { provider, upstreamId, at: Date.now() }); saveTasks();
+  return { id };
+}
+async function queryVideo(id) {
+  const t = TASKS.get(id); if (!t) throw new HttpError(404, '任务不存在');
+  if (t.url) return { status: 'succeeded', url: t.url };
+  if (t.error) return { status: 'failed', error: t.error };
+  let status, remote, error;
+  if (t.provider === 'kling') {
+    const j = await upstream(`${CFG.klingBase}/v1/videos/image2video/${t.upstreamId}`, { headers: { authorization: 'Bearer ' + klingJwt() } }, '可灵');
+    const s = j.data?.task_status; status = s === 'succeed' ? 'succeeded' : s === 'failed' ? 'failed' : 'running';
+    remote = j.data?.task_result?.videos?.[0]?.url; error = j.data?.task_status_msg;
+  } else {
+    const j = await upstream(`${CFG.arkBase}/contents/generations/tasks/${t.upstreamId}`, { headers: { authorization: 'Bearer ' + CFG.arkKey } }, 'Seedance');
+    const s = String(j.status || '').toLowerCase(); status = s === 'succeeded' ? 'succeeded' : ['failed', 'cancelled', 'expired'].includes(s) ? 'failed' : 'running';
+    remote = j.content?.video_url; error = j.error?.message;
+  }
+  if (status === 'succeeded') {
+    if (!remote) throw new HttpError(502, '任务完成但没有视频地址');
+    t.url = await download(remote, 'mp4'); saveTasks(); return { status, url: t.url };
+  }
+  if (status === 'failed') { t.error = error || '生成失败'; saveTasks(); return { status, error: t.error }; }
+  return { status: 'running', elapsed: Math.round((Date.now() - t.at) / 1000) };
+}
+
+/* ---------------- 合成成片：把各镜头 mp4 拼成一条 ---------------- */
+async function concatVideos({ urls, durs }) {
+  if (!HAS_FFMPEG) throw new HttpError(501, '服务器没有安装 ffmpeg，无法合成，请逐个下载镜头');
+  const files = (urls || []).map(u => path.join(FILES, path.basename(String(u))));
+  if (!files.length || files.some(f => !fs.existsSync(f))) throw new HttpError(400, '有镜头视频已不存在');
+  const out = path.join(FILES, newId() + '.mp4');
+  // 不同模型的分辨率可能不同，统一缩放后重新编码，保证能拼接
+  const inputs = files.flatMap(f => ['-i', f]);
+  const filt = files.map((_, i) => `[${i}:v]${+durs?.[i] > 0 ? `trim=duration=${+durs[i]},setpts=PTS-STARTPTS,` : ''}scale=720:-2:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2,setsar=1,fps=24[v${i}]`).join(';')
+    + ';' + files.map((_, i) => `[v${i}]`).join('') + `concat=n=${files.length}:v=1:a=0[v]`;
+  await new Promise((ok, bad) => {
+    const p = spawn('ffmpeg', ['-y', ...inputs, '-filter_complex', filt, '-map', '[v]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', out], { stdio: 'ignore' });
+    p.on('exit', c => (c === 0 ? ok() : bad(new HttpError(500, '合成失败（ffmpeg 退出码 ' + c + '）')))); p.on('error', bad);
+  });
+  return { url: '/files/' + path.basename(out) };
+}
+
+/* ---------------- 路由 ---------------- */
+const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.mp4': 'video/mp4', '.svg': 'image/svg+xml', '.json': 'application/json' };
+async function serveStatic(req, res, file) {
+  const st = await fsp.stat(file).catch(() => null); if (!st || !st.isFile()) { res.writeHead(404); res.end('Not found'); return; }
+  const type = MIME[path.extname(file)] || 'application/octet-stream', range = req.headers.range;
+  if (range && type === 'video/mp4') { // 视频拖动进度需要 Range
+    const [a, b] = range.replace('bytes=', '').split('-'); const start = +a || 0, end = b ? +b : st.size - 1;
+    res.writeHead(206, { 'content-type': type, 'content-range': `bytes ${start}-${end}/${st.size}`, 'accept-ranges': 'bytes', 'content-length': end - start + 1 });
+    fs.createReadStream(file, { start, end }).pipe(res); return;
+  }
+  res.writeHead(200, { 'content-type': type, 'content-length': st.size, 'cache-control': file.startsWith(FILES) ? 'public, max-age=31536000, immutable' : 'no-cache' });
+  fs.createReadStream(file).pipe(res);
+}
+const STATIC = new Set(['/index.html', '/styles.css', '/app.js']);
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://x'); const p = url.pathname;
+  try {
+    if (p.startsWith('/api/')) {
+      if (CFG.accessToken && p !== '/api/health' && req.headers['x-access-token'] !== CFG.accessToken) throw new HttpError(401, '需要访问口令');
+      if (p === '/api/health') return send(res, 200, {
+        ok: true, auth: !!CFG.accessToken, ffmpeg: HAS_FFMPEG,
+        models: { image: !!CFG.arkKey && CFG.imageModel, llm: !!CFG.arkKey && CFG.llmModel, seedance: !!CFG.arkKey && CFG.seedanceModel, kling: !!(CFG.klingAk && CFG.klingSk) && CFG.klingModel },
+      });
+      if (req.method === 'POST' && p === '/api/image') return send(res, 200, await genImage(await readJson(req)));
+      if (req.method === 'POST' && p === '/api/storyboard') return send(res, 200, await genStoryboard(await readJson(req)));
+      if (req.method === 'POST' && p === '/api/video') return send(res, 200, await createVideo(await readJson(req)));
+      if (req.method === 'GET' && p.startsWith('/api/video/')) return send(res, 200, await queryVideo(p.slice(11)));
+      if (req.method === 'POST' && p === '/api/concat') return send(res, 200, await concatVideos(await readJson(req)));
+      throw new HttpError(404, '接口不存在');
+    }
+    if (p.startsWith('/files/')) return serveStatic(req, res, path.join(FILES, path.basename(p)));
+    return serveStatic(req, res, path.join(ROOT, STATIC.has(p) ? p : '/index.html'));
+  } catch (e) {
+    const status = e.status || 500; if (status >= 500) console.error(p, e.message);
+    send(res, status, { error: e.message || '服务器错误' });
+  }
+});
+server.listen(CFG.port, () => {
+  console.log(`绘影已启动：http://localhost:${CFG.port}`);
+  console.log(`  火山方舟（Seedream / DeepSeek / Seedance）：${CFG.arkKey ? '已配置' : '未配置 ARK_API_KEY'}`);
+  console.log(`  可灵 2.5 Turbo：${CFG.klingAk && CFG.klingSk ? '已配置' : '未配置（精品档不可用）'}`);
+  console.log(`  ffmpeg 合成成片：${HAS_FFMPEG ? '可用' : '未安装'}`);
+});

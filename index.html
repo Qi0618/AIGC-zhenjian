@@ -41,10 +41,10 @@
     <!-- ============ 首页 ============ -->
     <section id="view-home" hidden>
       <div class="hero">
-        <span class="kicker"><b>Demo</b>未接模型，图片与视频由画布模拟生成</span>
+        <span class="kicker" id="modeKicker"><b>Demo</b>演示模式：图片与视频由画布模拟生成</span>
         <h1>一句话，<em>绘出商品图</em><br>一个故事，<em>拍成短剧</em></h1>
         <p>批量生成电商主图、场景图并一键适配各平台尺寸；从故事梗概到分镜、关键帧、成片，一条流水线完成。</p>
-        <div class="models"><span>图像生成<i>待接入</i></span><span>局部重绘<i>待接入</i></span><span>分镜大模型<i>待接入</i></span><span>图生视频<i>待接入</i></span></div>
+        <div class="models" id="modelChips"><span>生图 · Seedream 4.0<i data-m="image">演示</i></span><span>分镜 · DeepSeek V3.1<i data-m="llm">演示</i></span><span>视频 · Seedance 1.0 pro-fast<i data-m="seedance">演示</i></span><span>精品视频 · 可灵 2.5 Turbo<i data-m="kling">演示</i></span></div>
       </div>
       <div class="entries">
         <button class="panel entry" type="button" data-view-link="shop">
@@ -68,7 +68,7 @@
     <section id="view-shop" hidden>
       <div class="head">
         <div><h1>电商图片</h1><p>批量导入 SKU，按套图方案为每个商品生成整套图，再按平台批量改尺寸或换风格。</p></div>
-        <span class="mock"><b>●</b> MOCK 模式</span>
+        <span class="mock modeBadge"><b>●</b> 演示模式</span>
       </div>
       <div class="panel pbar">
         <span class="plabel">项目</span><input type="text" id="pnameShop" aria-label="项目名称">
@@ -97,7 +97,7 @@
               <div class="stepper"><button type="button" id="perMinus" aria-label="减少">−</button><span class="mono" id="perVal">1</span><button type="button" id="perPlus" aria-label="增加">+</button></div>
             </div>
             <div class="plan-sum" id="planSum"></div>
-            <button class="btn primary big" id="genBtn" type="button">生成整套图</button>
+            <div class="gen-row"><button class="btn primary big" id="genBtn" type="button">生成整套图</button><span class="model-note">生图模型 <b>Seedream 4.0</b></span></div>
           </div>
         </div>
 
@@ -133,7 +133,7 @@
     <section id="view-drama" hidden>
       <div class="head">
         <div><h1>短剧生成</h1><p>设定故事与角色，生成分镜脚本，确认关键帧后再逐镜生成视频。</p></div>
-        <span class="mock"><b>●</b> MOCK 模式</span>
+        <span class="mock modeBadge"><b>●</b> 演示模式</span>
       </div>
       <div class="panel pbar">
         <span class="plabel">项目</span><input type="text" id="pnameDrama" aria-label="项目名称">
@@ -167,7 +167,7 @@
           <div class="csec-h"><h3>角色卡</h3><span class="hint">参考图和主色会带进每个镜头，保证同一角色前后一致</span></div>
           <div class="cast" id="cast"></div>
         </div>
-        <div class="brief-foot"><span class="hint">切换题材会填入对应示例；修改过内容后不再覆盖。</span><button class="btn primary" id="toScript">生成分镜脚本</button></div>
+        <div class="brief-foot"><span class="hint">切换题材会填入对应示例；修改过内容后不再覆盖。</span><span class="model-note">分镜模型 <b>DeepSeek V3.1</b></span><button class="btn primary" id="toScript">生成分镜脚本</button></div>
       </div>
 
       <div id="d2" hidden>
@@ -193,6 +193,10 @@
       <div id="d4" class="studio" hidden>
         <div class="studio-left">
           <div class="panel vset">
+            <div class="field"><span class="label">视频模型</span><div class="vmodel" id="vModel">
+              <button type="button" class="vm" data-v="seedance"><span class="tier">推荐</span><b>Seedance 1.0 pro-fast</b><span class="pr" data-pr></span><small>720p · 出片快、性价比高，适合大多数短剧</small></button>
+              <button type="button" class="vm" data-v="kling"><span class="tier">精品</span><b>可灵 2.5 Turbo</b><span class="pr" data-pr></span><small>1080p · 人物运动更自然，按 5 秒为单位计费</small></button>
+            </div></div>
             <div class="field"><label class="label" for="vVoice">配音</label><select id="vVoice"><option>AI 配音 + 字幕</option><option>仅字幕</option><option>无</option></select></div>
             <span class="hint" id="vHint"></span>
             <button class="btn" id="exportVideo" disabled>导出成片</button>
@@ -201,7 +205,7 @@
           <div class="panel queue" id="queue"></div>
         </div>
         <div class="panel player">
-          <div class="screen" id="screen"><canvas id="pv"></canvas></div>
+          <div class="screen" id="screen"><canvas id="pv"></canvas><video id="pvVid" playsinline preload="auto" hidden></video></div>
           <div class="ctrl"><button class="btn" id="playBtn" disabled>播放</button><span class="mono" id="timeLbl">00:00 / 00:00</span></div>
           <div class="timeline" id="timeline"></div>
         </div>
@@ -242,6 +246,7 @@
   </div>
 </div>
 <div class="toast" id="toast" hidden></div>
+<div class="gate" id="gate" hidden><form class="panel" id="gateForm"><h3 style="margin:0">输入访问口令</h3><span class="hint">这台服务器设置了访问口令，请向管理员获取。</span><input id="gateIn" type="password" autocomplete="current-password" placeholder="访问口令" aria-label="访问口令"><button class="btn primary" type="submit">进入</button></form></div>
 <script src="app.js"></script>
 </body>
 </html>

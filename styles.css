@@ -372,6 +372,8 @@ textarea{resize:vertical;min-height:72px;line-height:1.6}
 .studio-left{display:flex;flex-direction:column;gap:14px;min-width:0}
 .vset{padding:14px 16px;display:flex;gap:14px;align-items:end;flex-wrap:wrap}
 .vset .field{width:200px}
+.vset .field:has(.vmodel){width:100%}
+.vmodel{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 .vset .hint{margin-right:auto;align-self:center;flex:1 1 200px}
 .queue{padding:6px}
 .q{display:grid;grid-template-columns:30px 56px minmax(0,1fr) 96px;gap:12px;align-items:center;padding:8px;border-radius:12px}
@@ -462,4 +464,22 @@ textarea{resize:vertical;min-height:72px;line-height:1.6}
   .ed-stage canvas{max-height:46vh}
   .gallery{columns:2 140px}
 }
+.vmodel{display:grid;gap:8px}
+.vm{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:4px 10px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--raise);cursor:pointer;text-align:left;width:100%;transition:border-color .15s,box-shadow .15s}
+.vm:hover:not(:disabled){border-color:var(--line-2)}
+.vm[aria-pressed="true"]{border-color:transparent;box-shadow:0 0 0 1.5px var(--accent)}
+.vm:disabled{opacity:.5;cursor:not-allowed}
+.vm b{font-weight:600;font-size:14px;min-width:0}
+.vm small{grid-column:1/-1;color:var(--mute);font-size:12px}
+.vm .tier{font-size:11px;padding:1px 8px;border-radius:999px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}
+.vm .pr{font-family:var(--f-mono);font-size:12px;color:var(--mute);white-space:nowrap}
+.screen{position:relative}
+.screen video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+.model-note{font-size:12px;color:var(--mute);display:inline-flex;align-items:center;gap:6px}
+.model-note b{font-weight:600;color:var(--ink)}
+.gen-row{display:flex;flex-direction:column;gap:8px;align-items:stretch}
+.gen-row .model-note{justify-content:center}
+.gate{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:color-mix(in srgb,var(--bg) 72%,transparent);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.gate form{display:grid;gap:12px;width:min(360px,calc(100% - 32px));padding:24px}
+.gate input{height:40px;border-radius:10px;border:1px solid var(--line);background:var(--raise);padding:0 12px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}

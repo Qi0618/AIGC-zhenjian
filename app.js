@@ -31,23 +31,114 @@ function dayLabel(t){const d=new Date(t),n=new Date(),k=x=>x.toDateString();if(k
 const rafFlags={};function onFrame(key,fn){if(rafFlags[key])return;rafFlags[key]=requestAnimationFrame(()=>{rafFlags[key]=0;fn()})}
 
 /* =====================================================================
-   模型接入点：把下面 4 个函数换成真实接口即可，页面其余部分不用改。
-   每个函数都返回 Promise，onProgress 接收 0~1 的进度。
+   模型接入：部署了后端（server/index.mjs）时走真实模型，否则走画布演示。
+   生图 Seedream 4.0 · 分镜 DeepSeek V3.1 · 视频 Seedance 1.0 pro-fast / 可灵 2.5 Turbo
    ===================================================================== */
+const LIVE={on:false,auth:false,ffmpeg:false,models:{},token:''};
+try{LIVE.token=localStorage.getItem('hy-token')||''}catch(e){}
+async function detectLive(){
+  if(!/^https?:$/.test(location.protocol))return;
+  try{const r=await fetch('/api/health',{cache:'no-store'});if(!r.ok)return;const j=await r.json();
+    if(j&&j.ok===true&&j.models)Object.assign(LIVE,{on:true,auth:!!j.auth,ffmpeg:!!j.ffmpeg,models:j.models})}catch(e){}
+}
+async function api(path,body){
+  const r=await fetch(path,{method:body?'POST':'GET',headers:{...(body?{'content-type':'application/json'}:{}),...(LIVE.token?{'x-access-token':LIVE.token}:{})},body:body?JSON.stringify(body):undefined});
+  const j=await r.json().catch(()=>({}));
+  if(r.status===401){showGate();throw new Error('需要访问口令')}
+  if(!r.ok||j.error)throw new Error(j.error||('服务器返回 '+r.status));
+  return j;
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function pool(items,n,fn){let i=0;await Promise.all(Array.from({length:Math.min(n,items.length)},async()=>{while(i<items.length){const k=i++;await fn(items[k],k)}}))}
+function imgData(img,max=1536){const w=img.naturalWidth||img.width,h=img.naturalHeight||img.height,k=Math.min(1,max/Math.max(w,h));const c=document.createElement('canvas');c.width=Math.round(w*k);c.height=Math.round(h*k);const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.drawImage(img,0,0,c.width,c.height);return c.toDataURL('image/jpeg',.9)}
+function waitImg(src){return new Promise((ok,bad)=>{const t=setTimeout(()=>bad(new Error('图片加载失败')),15000);const im=loadImg(src,()=>{clearTimeout(t);ok(IMG.get(src).im)});if(im){clearTimeout(t);ok(im)}})}
+async function skuRef(sku){if(!sku)return null;if(sku.sample)return imgData(productImg(sku));const src=srcOf(sku);return src?imgData(await waitImg(src)):null}
+async function charRef(ch){const src=srcOf(ch);return src?imgData(await waitImg(src),1024):null}
+// 关键帧（含局部重绘补丁）合成为一张图，用作局部重绘的底图和视频首帧
+async function frameData(s){
+  const [W,H]=dr().ratio==='16:9'?[1280,720]:[720,1280];
+  if(s.kfUrl)await waitImg(s.kfUrl);for(const pt of s.patches||[])if(pt.url)await waitImg(pt.url).catch(()=>{});
+  const c=document.createElement('canvas');c.width=W;c.height=H;drawFrame(c.getContext('2d'),W,H,s,0,{});return c.toDataURL('image/jpeg',.92);
+}
+
+const STYLE_PROMPT={minimal:'极简白色调，大面积留白，干净克制',cream:'奶油暖调，米色与焦糖色，柔和漫射光',tech:'深蓝色科技感，冷色边缘光与光晕，未来感',fresh:'自然清新，浅绿色调，植物元素，明亮日光',guochao:'国潮红金配色，中式纹样与祥云元素，喜庆华丽',gray:'高级灰色调，低饱和度，硬朗光影，质感高级'};
+const TYPE_PROMPT={
+  white:()=>'纯白背景（#FFFFFF）的电商白底商品图，商品居中完整展示，底部有柔和的接地阴影，不要任何文字、道具和装饰',
+  main:sku=>{const pts=(sku.points||'').split('\n').map(x=>x.trim()).filter(Boolean).slice(0,3),pr=(sku.price||'').trim();
+    return `电商主图，商品是画面视觉中心。画面上用醒目清晰的中文排版写出商品名「${sku.name||''}」${pts.length?`，用小标签写出卖点：${pts.map(x=>'「'+x+'」').join('、')}`:''}${pr?`，角落用价格标写「到手价 ¥${pr}」`:''}。文字必须准确、没有错别字，排版干净有设计感`},
+  scene:()=>'生活方式场景图，商品自然地放在与品类相符的真实使用场景里，搭配少量相关道具，浅景深，自然光，不要任何文字'};
+function shopPrompt(j,sku){
+  const z=size(j.size),st=STYLE_PROMPT[j.style]||'';
+  if(j.task==='resize')return `参考图第一张是已经做好的商品图。把它重新排版为 ${z.w}:${z.h} 的画幅（${z.label}），商品、文字内容、配色和风格保持完全一致，只调整构图让画面自然地填满新画幅。`;
+  if(j.task==='restyle')return `参考图第一张是已经做好的商品图。保持商品外观、构图和文字内容不变，把整体视觉风格改为：${st}。${TYPE_PROMPT[j.type](sku)}。`;
+  return `参考图里的商品是「${sku.name||'商品'}」，必须保持商品的外形、颜色、包装和印刷文字完全一致。${TYPE_PROMPT[j.type](sku)}。视觉风格：${st}。画幅 ${z.w}:${z.h}，商业摄影质感，高清细节。`;
+}
+const CAM_TXT={推:'镜头缓慢推进',拉:'镜头缓慢拉远',摇:'镜头水平摇移',跟:'镜头跟随人物移动',手持:'手持镜头轻微晃动'};
+function areaText(r){const pc=v=>Math.round(v*100)+'%';return `画面中横向 ${pc(r.x)}～${pc(r.x+r.w)}、纵向 ${pc(r.y)}～${pc(r.y+r.h)} 的矩形区域`}
+
 const API={
-  /** 电商图：jobs = [{skuId,type,style,size,seed}] → 返回带 seed 的同一批 job（真实接口可附加 url） */
-  generateImages(jobs,onProgress){return mockProgress(1400+jobs.length*50,onProgress).then(()=>jobs.map(j=>({...j,seed:j.seed||rseed()})))},
-  /** 分镜脚本：story = {genre,title,syn,chars,nShots,len} → 返回镜头数组 */
-  generateStoryboard(story){return mockProgress(1100).then(()=>mockStoryboard(story))},
-  /** 关键帧：req = {shot,prompt,region:{x,y,w,h}|null,note} → 返回 {seed}（真实接口返回图片 url） */
-  generateKeyframe(req,onProgress){return mockProgress(req.region?700:1000,onProgress).then(()=>({seed:rseed()}))},
-  /** 视频：shot 带已确认的关键帧 → 返回 {ok}（真实接口返回视频 url） */
-  generateVideo(shot,onProgress){return mockProgress(1000+shot.dur*260,onProgress).then(()=>({ok:true}))},
+  /** 电商图：jobs=[{skuId,type,style,size,seed,task?,from?}] → 同一批 job，带 url；失败的带 error */
+  async generateImages(jobs,onProgress){
+    if(!LIVE.on)return mockProgress(1400+jobs.length*50,onProgress).then(()=>jobs.map(({from,task,...j})=>({...j,seed:j.seed||rseed()})));
+    let done=0;const out=new Array(jobs.length),refs={};onProgress&&onProgress(.02);
+    await pool(jobs,3,async(j,i)=>{const {from,task,...rest}=j;
+      try{const sku=skuById(j.skuId);refs[j.skuId]=refs[j.skuId]||skuRef(sku).catch(()=>null);const ref=await refs[j.skuId],z=size(j.size);
+        const r=await api('/api/image',{prompt:shopPrompt(j,sku||{}),images:[from,ref].filter(Boolean),width:z.w,height:z.h});out[i]={...rest,seed:j.seed||rseed(),url:r.url}}
+      catch(e){out[i]={...rest,error:e.message}}
+      done++;onProgress&&onProgress(Math.max(.02,done/jobs.length))});
+    return out;
+  },
+  /** 分镜脚本：story={genre,title,syn,chars,nShots,len,ratio} → 镜头数组 */
+  async generateStoryboard(story){
+    if(!LIVE.on)return mockProgress(1100).then(()=>mockStoryboard(story));
+    const r=await api('/api/storyboard',{story:{...story,chars:story.chars.map(c=>({name:c.name,role:c.role,look:c.look}))},enums:{scales:SCALES,moods:Object.keys(MOODS),moodNames:MOOD_NAME,cams:CAMS}});
+    return r.shots.map(x=>toShot([x.scale,x.mood,x.desc,x.line,x.dur,x.cam,x.cast],story.chars));
+  },
+  /** 关键帧：req={shot,prompt,region|null,note} → {seed,url}；失败 {error} */
+  async generateKeyframe(req,onProgress){
+    if(!LIVE.on)return mockProgress(req.region?700:1000,onProgress).then(()=>({seed:rseed()}));
+    const s=req.shot,wide=dr().ratio==='16:9',[W,H]=wide?[1920,1080]:[1080,1920];
+    let p=0;const tm=setInterval(()=>{p=Math.min(.92,p+.035);onProgress&&onProgress(p)},700);
+    try{
+      const refs=[];if(req.region)refs.push(await frameData(s));
+      for(const ch of (s.cast||[]).map(charById).filter(Boolean)){const d=await charRef(ch).catch(()=>null);if(d)refs.push(d)}
+      const roleNote=refs.length>(req.region?1:0)?'\n出镜角色的定妆照已作为参考图提供，人物长相、发型和服装必须与参考图一致。':'';
+      const prompt=req.region
+        ?`参考图第一张是当前关键帧。保持整体构图、人物、光线和画风不变，只修改${areaText(req.region)}：${req.note||'重新绘制这一块，让它更自然'}。${roleNote}`
+        :`${req.prompt}${roleNote}\n电影级画面，${wide?'横屏':'竖屏'}短剧关键帧，构图完整，画面中不要出现字幕、文字和水印。`;
+      const r=await api('/api/image',{prompt,images:refs,width:W,height:H});onProgress&&onProgress(1);return{seed:rseed(),url:r.url};
+    }catch(e){return{error:e.message}}finally{clearInterval(tm)}
+  },
+  /** 视频：shot 带已确认的关键帧；model=seedance|kling → {url}；失败 {error} */
+  async generateVideo(s,model,onProgress){
+    if(!LIVE.on)return mockProgress(1000+s.dur*260,onProgress).then(()=>({ok:true}));
+    try{
+      const image=!s.kfUrl||(s.patches||[]).some(x=>x.url)?await frameData(s):s.kfUrl;
+      const prompt=`${s.desc}${s.cam&&s.cam!=='固定'?CAM_TXT[s.cam]+'。':'镜头固定。'}${s.line?`人物说：“${s.line}”。`:''}画面风格与首帧一致，人物动作自然流畅。`;
+      const {id}=await api('/api/video',{provider:model,image,prompt,duration:s.dur,ratio:dr().ratio});
+      const exp=model==='kling'?150:70,t0=Date.now();let fails=0;
+      for(;;){await sleep(5000);let r;try{r=await api('/api/video/'+id);fails=0}catch(e){if(++fails>=4)throw e;continue}
+        if(r.status==='succeeded'){onProgress&&onProgress(1);return{url:r.url}}
+        if(r.status==='failed')return{error:r.error||'生成失败'};
+        onProgress&&onProgress(Math.min(.95,(Date.now()-t0)/1000/exp))}
+    }catch(e){return{error:e.message}}
+  },
 };
 function mockProgress(ms,cb){return new Promise(res=>{const t0=performance.now();const tick=()=>{const p=Math.min(1,(performance.now()-t0)/ms);cb&&cb(p);if(p>=1)res();else setTimeout(tick,110)};tick()})}
 
-/* 价格配置（示意，单位：积分） */
-const PRICING={imageBase:2,imageLarge:3,largeSide:1500,storyboard:5,keyframe:4,inpaint:2,videoPerSec:10};
+/* 价格（单位：积分，1 积分 = 0.1 元）。按模型成本约 2 倍定价：
+   Seedream 4.0 0.2 元/张 · DeepSeek V3.1 每次分镜约 0.02 元 · Seedance pro-fast 720p 约 0.3~0.4 元/秒 · 可灵 2.5 Turbo 1080p 约 2.5 元/5 秒 */
+const PRICING={image:4,storyboard:2,keyframe:4,inpaint:4,seedancePerSec:8,klingPer5s:50};
+function refund(p,n){if(n<=0)return;APP.credits+=n;p.spent=Math.max(0,(p.spent||0)-n);Store.saveWallet().catch(()=>{});renderWallet()}
+function saveUrl(url,name){const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove()}
+function showGate(){$('#gate').hidden=false;setTimeout(()=>$('#gateIn').focus(),50)}
+function applyMode(){
+  if(!LIVE.on)return;const M=LIVE.models,any=M.image||M.llm||M.seedance;
+  $('#modeKicker').innerHTML=any?'<b>已接入</b>Seedream 4.0 · DeepSeek V3.1 · Seedance · 可灵':'<b>待配置</b>后端已连接，还没有填写模型密钥';
+  $$('.modeBadge').forEach(b=>b.innerHTML=any?'<b style="color:var(--ok)">●</b> 已接入模型':'<b>●</b> 后端未配置密钥');
+  $$('#modelChips i[data-m]').forEach(i=>i.textContent=M[i.dataset.m]?'已接入':'未配置');
+  if(LIVE.auth&&!LIVE.token)showGate();
+}
 const DEFAULT_CREDITS=3000;
 
 /* ================= 存储：Claude 云端 → 浏览器本地 → 仅本次会话 ================= */
@@ -222,12 +313,16 @@ function unpackShop(st){st=JSON.parse(JSON.stringify(st||{}));const d=newShopSta
 const sh=()=>SHOP.state;
 const size=k=>SIZES[k]||sh().customSizes[k]||SIZES.sq;
 const skuById=id=>sh().skus.find(s=>s.id===id);
-const priceImage=k=>{const s=size(k);return Math.max(s.w,s.h)>PRICING.largeSide?PRICING.imageLarge:PRICING.imageBase};
+const priceImage=k=>PRICING.image;
 const CANV=new Map(),PREV=new Map();
 
 function renderImage(cv,r,maxSide=560){
   const sz=size(r.size),k=Math.min(maxSide/sz.w,maxSide/sz.h);
   const W=Math.round(sz.w*k),H=Math.round(sz.h*k);cv.width=W;cv.height=H;
+  if(r.url){const c0=cv.getContext('2d'),im=loadImg(r.url,()=>{r.dirty=true;if(APP.view==='shop')onFrame('groups',renderGroups)});
+    if(im){const q=Math.max(W/im.naturalWidth,H/im.naturalHeight),iw=im.naturalWidth*q,ih=im.naturalHeight*q;c0.drawImage(im,(W-iw)/2,(H-ih)/2,iw,ih)}
+    else{c0.fillStyle='#E9EAEE';c0.fillRect(0,0,W,H);c0.fillStyle='#8A8F96';c0.font='500 '+Math.min(W,H)*.05+'px '+FONT;c0.textAlign='center';c0.fillText('图片加载中…',W/2,H/2)}
+    return}
   const c=cv.getContext('2d'),st=STYLES[r.style]||STYLES.minimal,R=rng(r.seed),m=Math.min(W,H);
   const wide=W/H>1.5,tall=H/W>1.25,sku=r.sku||skuById(r.skuId)||{name:'',points:'',price:''};
   const img=productImg(sku,r.sku?null:()=>{sh().results.forEach(x=>{if(x.skuId===sku.id)x.dirty=true});PREV.clear();renderGroups();renderSkuList();renderPlan()});
@@ -329,7 +424,7 @@ function renderPlan(){
   $('#sizeChips').innerHTML=allSizeKeys().map(k=>{const s=size(k),cu=!SIZES[k];return `<button type="button" class="chip" data-v="${k}" aria-pressed="${p.sizes.includes(k)}" title="${s.w}×${s.h}">${ratioGlyph(k)}${esc(s.label)}${cu?' <span class="mono" style="font-size:11px;opacity:.7">'+s.w+'×'+s.h+'</span><span class="x" data-rm="'+k+'" aria-label="删除这个尺寸">×</span>':''}</button>`}).join('');
   $('#perVal').textContent=p.per;
   const n=sh().skus.filter(s=>s.on).length,each=p.types.length*p.sizes.length*p.per,jobs=planJobs(),cost=jobs.reduce((a,j)=>a+priceImage(j.size),0);
-  $('#planSum').innerHTML=n&&each?`<span><b>${n}</b> 个 SKU × 每套 <b>${each}</b> 张（${p.types.length} 类型 × ${p.sizes.length} 尺寸 × ${p.per}）= 共 <b>${jobs.length}</b> 张</span>${estHtml(cost)}<span class="hint">单张 ${PRICING.imageBase} 积分，长边超过 ${PRICING.largeSide}px 为 ${PRICING.imageLarge} 积分</span>`:'<span class="hint">请至少勾选一个 SKU、一种类型和一个尺寸</span>';
+  $('#planSum').innerHTML=n&&each?`<span><b>${n}</b> 个 SKU × 每套 <b>${each}</b> 张（${p.types.length} 类型 × ${p.sizes.length} 尺寸 × ${p.per}）= 共 <b>${jobs.length}</b> 张</span>${estHtml(cost)}<span class="hint">每张 ${PRICING.image} 积分</span>`:'<span class="hint">请至少勾选一个 SKU、一种类型和一个尺寸</span>';
   $('#genBtn').disabled=genBusy||!(n&&each)||cost>APP.credits;
   $('#genBtn').innerHTML=genBusy?'生成中…':`生成整套图${n&&each?` <span class="cost">· ${num(cost)} 积分</span>`:''}`;
 }
@@ -378,7 +473,7 @@ $('#groups').onclick=e=>{
   const card=e.target.closest('.card[data-id]');if(!card)return;const r=sh().results.find(x=>x.id==card.dataset.id);if(!r)return;
   if(e.target.closest('.check')){r.sel=!r.sel;card.classList.toggle('sel',r.sel);updateSel();const g=card.closest('.group'),rs=sh().results.filter(x=>x.skuId===g.dataset.sku);$('[data-gsel]',g).textContent=rs.every(x=>x.sel)?'取消本组':'全选本组';return}
   if(e.target.closest('[data-act=regen]')){const proj=SHOP,cost=priceImage(r.size);if(!spend(proj,cost))return;const b=e.target.closest('[data-act]');b.disabled=true;b.textContent='生成中…';
-    API.generateImages([{skuId:r.skuId,type:r.type,style:r.style,size:r.size,seed:rseed()}]).then(([j])=>{r.seed=j.seed;r.ver++;r.demo=false;r.dirty=true;touch(proj);if(SHOP===proj)renderGroups();toast(`已重新生成，消耗 ${cost} 积分`);logHistory(proj,'重新生成 1 张图',`${skuById(r.skuId)?.name||''} · ${TYPES[r.type]}`,cost)});return}
+    API.generateImages([{skuId:r.skuId,type:r.type,style:r.style,size:r.size,seed:rseed()}]).then(([j])=>{if(j.error){refund(proj,cost);b.disabled=false;b.textContent='重新生成';toast('生成失败，已退回积分：'+j.error);return}r.seed=j.seed;r.url=j.url;r.ver++;r.demo=false;r.dirty=true;touch(proj);if(SHOP===proj)renderGroups();toast(`已重新生成，消耗 ${cost} 积分`);logHistory(proj,'重新生成 1 张图',`${skuById(r.skuId)?.name||''} · ${TYPES[r.type]}`,cost)});return}
   if(e.target.closest('.frame')){renderImage($('#modalCv'),r,1000);const s=size(r.size);$('#modalMeta').textContent=`${skuById(r.skuId)?.name||''} · ${TYPES[r.type]} · ${STYLES[r.style].name} · ${s.label} ${s.w}×${s.h}`;$('#modal').hidden=false}
 };
 $('#modal').onclick=()=>$('#modal').hidden=true;
@@ -393,7 +488,7 @@ function showSkeleton(total,label){
 function runImageJobs(proj,jobs,label,after){
   const cost=jobs.reduce((a,j)=>a+priceImage(j.size),0);if(!spend(proj,cost))return;
   genBusy=true;renderPlan();const sk=showSkeleton(jobs.length,label);
-  API.generateImages(jobs,p=>sk.update(p)).then(res=>{sk.remove();genBusy=false;after(res,cost);touch(proj);if(SHOP===proj){renderGroups();renderSkuList()}renderPlan()});
+  API.generateImages(jobs,p=>sk.update(p)).then(res=>{sk.remove();genBusy=false;const bad=res.filter(j=>j.error),ok=res.filter(j=>!j.error),back=bad.reduce((a,j)=>a+priceImage(j.size),0);refund(proj,back);if(ok.length)after(ok,cost-back);if(bad.length)toast(`${bad.length} 张生成失败，已退回 ${num(back)} 积分：${bad[0].error}`);touch(proj);if(SHOP===proj){renderGroups();renderSkuList()}renderPlan()});
 }
 $('#genBtn').onclick=()=>{
   const proj=SHOP,p=sh().plan,skus=sh().skus.filter(s=>s.on),jobs=planJobs().map(j=>({...j,seed:rseed()}));if(!jobs.length)return;
@@ -401,9 +496,14 @@ $('#genBtn').onclick=()=>{
 };
 $('#selAll').onclick=()=>{const R=sh().results,all=R.every(r=>r.sel);R.forEach(r=>r.sel=!all);renderGroups()};
 $('#delBtn').onclick=()=>{const st=sh(),n=st.results.filter(r=>r.sel).length;st.results=st.results.filter(r=>{if(r.sel)CANV.delete(r.id);return!r.sel});touch(SHOP);renderGroups();renderSkuList();toast(`已删除 ${n} 张`)};
-$('#exportBtn').onclick=()=>toast('演示版暂不导出。正式版会按 SKU 分文件夹打包为 ZIP');
+$('#exportBtn').onclick=()=>{
+  if(!LIVE.on){toast('演示模式不能导出。部署后端后可下载原尺寸图片');return}
+  const sel=sh().results.filter(r=>r.sel);
+  sel.forEach((r,i)=>setTimeout(()=>{const z=size(r.size),cv=document.createElement('canvas');renderImage(cv,r,Math.max(z.w,z.h));
+    cv.toBlob(bl=>{const u=URL.createObjectURL(bl);saveUrl(u,`${(skuById(r.skuId)?.name||'商品').replace(/[\\/:*?"<>|]/g,'')}_${TYPES[r.type]}_${z.w}x${z.h}.png`);setTimeout(()=>URL.revokeObjectURL(u),4000)},'image/png')},i*350));
+  toast(`开始下载 ${sel.length} 张原尺寸图片`)};
 function togglePop(id){$$('.pop').forEach(p=>{if(p.id!==id)p.hidden=true});$('#'+id).hidden=!$('#'+id).hidden}
-function resizeJobs(){const sizes=$$('#sizeList input:checked').map(i=>i.value),jobs=[];sh().results.filter(r=>r.sel).forEach(r=>sizes.forEach(s=>{if(s!==r.size)jobs.push({skuId:r.skuId,type:r.type,style:r.style,seed:r.seed,size:s})}));return{sizes,jobs}}
+function resizeJobs(){const sizes=$$('#sizeList input:checked').map(i=>i.value),jobs=[];sh().results.filter(r=>r.sel).forEach(r=>sizes.forEach(s=>{if(s!==r.size)jobs.push({skuId:r.skuId,type:r.type,style:r.style,seed:r.seed,size:s,...(r.url?{from:r.url,task:'resize'}:{})})}));return{sizes,jobs}}
 function updResizeEst(){const {jobs}=resizeJobs(),cost=jobs.reduce((a,j)=>a+priceImage(j.size),0);$('#resizeEst').outerHTML=`<span class="est" id="resizeEst">${jobs.length} 张 · ${num(cost)} 积分</span>`;$('#resizeApply').disabled=!jobs.length||cost>APP.credits}
 function renderSizeList(checked){$('#sizeList').innerHTML=allSizeKeys().map(k=>{const v=size(k);return `<label class="size-opt"><input type="checkbox" value="${k}" ${checked.includes(k)?'checked':''}>${ratioGlyph(k)}<span>${esc(v.label)}</span><span class="mono">${v.w}×${v.h}</span></label>`}).join('');updResizeEst()}
 $('#sizeList').addEventListener('change',updResizeEst);
@@ -418,7 +518,7 @@ $('#resizeApply').onclick=()=>{
 };
 $('#restyleApply').onclick=()=>{
   const proj=SHOP,st=$('#restyleGrid [aria-pressed=true]').dataset.v,sel=sh().results.filter(r=>r.sel);$('#restylePop').hidden=true;
-  runImageJobs(proj,sel.map(r=>({skuId:r.skuId,type:r.type,style:st,size:r.size,seed:r.seed})),'替换风格',(res,cost)=>{sel.forEach(r=>{r.style=st;r.ver++;r.demo=false;r.dirty=true});toast(`已将 ${sel.length} 张改为「${STYLES[st].name}」，消耗 ${num(cost)} 积分`);logHistory(proj,`批量改风格 ${sel.length} 张`,'改为 '+STYLES[st].name,cost)});
+  runImageJobs(proj,sel.map(r=>({rid:r.id,skuId:r.skuId,type:r.type,style:st,size:r.size,seed:r.seed,...(r.url?{from:r.url,task:'restyle'}:{})})),'替换风格',(res,cost)=>{res.forEach(j=>{const r=sel.find(x=>x.id===j.rid);if(!r)return;r.style=st;r.url=j.url;r.seed=j.seed;r.ver++;r.demo=false;r.dirty=true});toast(`已将 ${res.length} 张改为「${STYLES[st].name}」，消耗 ${num(cost)} 积分`);logHistory(proj,`批量改风格 ${sel.length} 张`,'改为 '+STYLES[st].name,cost)});
 };
 $('#pnameShop').addEventListener('input',e=>{SHOP.name=e.target.value||'未命名项目';touch(SHOP)});
 
@@ -521,17 +621,29 @@ function drawScene(c,W,H,sh,t,opt){
   cast.forEach((ch,i)=>{const src=srcOf(ch),img=src?loadImg(src,opt.onImg):null;const top=figure(c,xs[i],base,fh*(i?0.96:1),p.fig,ch.color,p.rim,Math.max(1,m*.006),img);tags.push([xs[i],top,ch])});
   c.restore();return tags;
 }
+const imgRepaint=()=>onFrame('dramaImg',()=>{if(APP.view!=='drama'||!DRAMA)return;const st=DRAMA.state;if(st.step===3)renderKf();else if(st.step===4)renderStudio();else if(st.step===2&&typeof renderShots==='function')renderShots()});
+function drawReal(c,W,H,sh,t,opt){
+  const on=opt.onImg||imgRepaint,im=loadImg(sh.kfUrl,on);
+  c.fillStyle='#0C0D10';c.fillRect(0,0,W,H);
+  if(!im){c.fillStyle='#8A8F96';c.font=Math.max(10,Math.min(W,H)*.05)+'px '+FONT;c.textAlign='center';c.fillText('加载中…',W/2,H/2);return true}
+  let k=1,tx=0;if(opt.meta){if(sh.cam==='推')k=1+.08*t;else if(sh.cam==='拉')k=1.08-.08*t;else if(sh.cam==='摇')tx=(t-.5)*W*.06}
+  const cover=img=>{const q=Math.max(W/img.naturalWidth,H/img.naturalHeight)*k,iw=img.naturalWidth*q,ih=img.naturalHeight*q;return[(W-iw)/2+tx,(H-ih)/2,iw,ih]};
+  c.drawImage(im,...cover(im));
+  (sh.patches||[]).forEach(pt=>{if(!pt.url)return;const pi=loadImg(pt.url,on);if(!pi)return;c.save();c.beginPath();c.rect(pt.x*W,pt.y*H,pt.w*W,pt.h*H);c.clip();c.drawImage(pi,...cover(pi));c.restore()});
+  return true;
+}
 function drawFrame(c,W,H,sh,t,opt={}){
   const look=opt.look||dr().look,m=Math.min(W,H);
   c.clearRect(0,0,W,H);
-  const tags=drawScene(c,W,H,sh,t,opt);
-  (sh.patches||[]).forEach(pt=>{const off=document.createElement('canvas');off.width=W;off.height=H;drawScene(off.getContext('2d'),W,H,{...sh,seed:pt.seed},t,opt);
+  const real=!!sh.kfUrl&&drawReal(c,W,H,sh,t,opt);
+  const tags=real?[]:drawScene(c,W,H,sh,t,opt);
+  if(!real)(sh.patches||[]).forEach(pt=>{const off=document.createElement('canvas');off.width=W;off.height=H;drawScene(off.getContext('2d'),W,H,{...sh,seed:pt.seed},t,opt);
     c.save();c.beginPath();c.rect(pt.x*W,pt.y*H,pt.w*W,pt.h*H);c.clip();c.drawImage(off,0,0);c.restore()});
   if(opt.tags)tags.forEach(([x,top,ch])=>{const fs=Math.max(9,m*.04);c.font='500 '+fs+'px '+FONT;const w=c.measureText(ch.name).width+fs;const y=Math.max(fs*1.6,Math.min(H-fs*2,top-fs*.6));c.fillStyle=ch.color;rr(c,x-w/2,y-fs*1.2,w,fs*1.5,fs*.4);c.fill();c.fillStyle='#fff';c.textAlign='center';c.fillText(ch.name,x,y)});
-  if(look==='anime'){c.save();c.globalCompositeOperation='overlay';c.fillStyle='rgba(255,170,215,.28)';c.fillRect(0,0,W,H);c.restore();c.save();c.globalCompositeOperation='soft-light';c.fillStyle='rgba(255,255,255,.25)';c.fillRect(0,0,W,H);c.restore()}
-  if(look==='film'){c.save();c.globalCompositeOperation='overlay';c.fillStyle='rgba(30,90,110,.25)';c.fillRect(0,0,W,H);c.restore()}
-  const lb=look==='film'?H*(W>H?.1:.08):0;if(lb){c.fillStyle='#000';c.fillRect(0,0,W,lb);c.fillRect(0,H-lb,W,lb)}
-  const v=c.createRadialGradient(W/2,H/2,m*.3,W/2,H/2,Math.max(W,H)*.75);v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(0,0,0,'+(look==='anime'?.2:.45)+')');c.fillStyle=v;c.fillRect(0,0,W,H);
+  if(!real&&look==='anime'){c.save();c.globalCompositeOperation='overlay';c.fillStyle='rgba(255,170,215,.28)';c.fillRect(0,0,W,H);c.restore();c.save();c.globalCompositeOperation='soft-light';c.fillStyle='rgba(255,255,255,.25)';c.fillRect(0,0,W,H);c.restore()}
+  if(!real&&look==='film'){c.save();c.globalCompositeOperation='overlay';c.fillStyle='rgba(30,90,110,.25)';c.fillRect(0,0,W,H);c.restore()}
+  const lb=!real&&look==='film'?H*(W>H?.1:.08):0;if(lb){c.fillStyle='#000';c.fillRect(0,0,W,lb);c.fillRect(0,H-lb,W,lb)}
+  const v=c.createRadialGradient(W/2,H/2,m*.3,W/2,H/2,Math.max(W,H)*.75);v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(0,0,0,'+(look==='anime'?.2:.45)+')');c.fillStyle=v;if(!real)c.fillRect(0,0,W,H);
   if(opt.meta){c.fillStyle='rgba(255,255,255,.75)';c.font='500 '+m*.04+'px "IBM Plex Mono",monospace';c.textAlign='left';c.fillText(`S${pad2(opt.no||1)} · ${sh.scale} · ${sh.cam}`,m*.05,lb+m*.08)}
   if(opt.sub&&sh.line){const fs=m*.05;c.font='500 '+fs+'px '+FONT;c.textAlign='center';const lines=wrap(c,sh.line,W*.84);let y=H-lb-m*.1-(lines.length-1)*fs*1.3;
     lines.forEach(l=>{c.lineWidth=fs*.18;c.strokeStyle='rgba(0,0,0,.7)';c.strokeText(l,W/2,y);c.fillStyle='#fff';c.fillText(l,W/2,y);y+=fs*1.3})}
@@ -561,10 +673,10 @@ $('#dSyn').addEventListener('input',e=>{dr().syn=e.target.value;dr().dirty=true;
 $('#dLen').onchange=e=>{dr().len=+e.target.value;touch(DRAMA)};
 $('#dShots').onchange=e=>{dr().nShots=+e.target.value;touch(DRAMA)};
 $('#ratioSeg').onclick=e=>{const b=e.target.closest('button');if(!b||b.dataset.v===dr().ratio)return;dr().ratio=b.dataset.v;$$('#ratioSeg button').forEach(x=>x.setAttribute('aria-pressed',x===b));resetFrames('画面比例已更改，关键帧和视频需要重新生成');touch(DRAMA);renderLooks()};
-function resetFrames(msg){const st=dr();if(st.shots.some(s=>s.kf!=='none'||s.video!=='none')){st.shots.forEach(s=>{s.kf='none';s.video='none';s.patches=[]});renderSteps();toast(msg)}}
+function resetFrames(msg){const st=dr();if(st.shots.some(s=>s.kf!=='none'||s.video!=='none')){st.shots.forEach(s=>{s.kf='none';s.video='none';s.patches=[];delete s.kfUrl;delete s.videoUrl});renderSteps();toast(msg)}}
 
 /* 画风预览：用本剧第一个有角色出镜的镜头（还没有分镜时用题材示例镜头）各出一张 */
-function lookSampleShot(){const st=dr();const s=st.shots.find(x=>x.cast&&x.cast.length)||st.shots[0];if(s)return{...s,patches:[]};const g=GENRES[st.genre].shots;return{...toShot(g.find(a=>a[6].length)||g[0],st.chars),seed:11}}
+function lookSampleShot(){const st=dr();const s=st.shots.find(x=>x.cast&&x.cast.length)||st.shots[0];if(s)return{...s,patches:[],kfUrl:undefined};const g=GENRES[st.genre].shots;return{...toShot(g.find(a=>a[6].length)||g[0],st.chars),seed:11}}
 function renderLooks(){
   const G=$('#lookGrid'),s=lookSampleShot(),cur=dr().look;G.innerHTML='';
   Object.entries(LOOK_NAME).forEach(([k,v])=>{const b=document.createElement('button');b.type='button';b.className='style-card';b.dataset.v=k;b.setAttribute('aria-pressed',k===cur);
@@ -602,20 +714,20 @@ $('#cast').addEventListener('click',e=>{
   const rm=e.target.closest('[data-rm]');if(rm){if(!rm.dataset.c){rm.dataset.c=1;rm.textContent='确认删除';return}const st=dr();st.chars=st.chars.filter(c=>c.id!==ch.id);st.shots.forEach(s=>s.cast=s.cast.filter(id=>id!==ch.id));st.dirty=true;touch(DRAMA);renderCast()}
 });
 
-function storyOf(st){return{genre:st.genre,title:st.title,syn:st.syn,chars:st.chars,nShots:st.nShots,len:st.len}}
+function storyOf(st){return{genre:st.genre,title:st.title,syn:st.syn,chars:st.chars,nShots:st.nShots,len:st.len,ratio:st.ratio}}
 function genStoryboard(proj,after){
   if(!spend(proj,PRICING.storyboard))return false;
-  API.generateStoryboard(storyOf(proj.state)).then(shots=>{proj.state.shots=shots;proj.state.maxStep=Math.max(2,Math.min(proj.state.maxStep,2));touch(proj);logHistory(proj,`生成分镜脚本 ${shots.length} 镜`,proj.state.title,PRICING.storyboard);after(shots)});
+  API.generateStoryboard(storyOf(proj.state)).then(shots=>{proj.state.shots=shots;proj.state.maxStep=Math.max(2,Math.min(proj.state.maxStep,2));touch(proj);logHistory(proj,`生成分镜脚本 ${shots.length} 镜`,proj.state.title,PRICING.storyboard);after(shots)}).catch(e=>{refund(proj,PRICING.storyboard);after(null,e)});
   return true;
 }
 $('#toScript').onclick=()=>{
   const proj=DRAMA,st=dr(),b=$('#toScript');if(!st.chars.length){toast('请至少添加一个角色');return}
   if(st.shots.length&&!b.dataset.c){b.dataset.c=1;setScriptBtn();return}
   delete b.dataset.c;
-  if(!genStoryboard(proj,shots=>{b.disabled=false;setScriptBtn();st.maxStep=2;if(DRAMA===proj)goStep(2);toast(`已生成 ${shots.length} 个镜头，消耗 ${PRICING.storyboard} 积分`)})){setScriptBtn();return}
+  if(!genStoryboard(proj,(shots,err)=>{b.disabled=false;setScriptBtn();if(!shots){toast('分镜生成失败，已退回积分：'+err.message);return}st.maxStep=2;if(DRAMA===proj)goStep(2);toast(`已生成 ${shots.length} 个镜头，消耗 ${PRICING.storyboard} 积分`)})){setScriptBtn();return}
   b.disabled=true;b.textContent='正在拆解剧情…';
 };
-$('#regenAll').onclick=()=>{const proj=DRAMA,b=$('#regenAll');if(genStoryboard(proj,()=>{b.disabled=false;b.textContent='重新生成全部';if(DRAMA===proj){renderShots();renderSteps()}toast('已重新生成分镜')})){b.disabled=true;b.textContent='生成中…'}};
+$('#regenAll').onclick=()=>{const proj=DRAMA,b=$('#regenAll');if(genStoryboard(proj,(shots,err)=>{b.disabled=false;b.textContent='重新生成全部';if(!shots){renderStats();toast('分镜生成失败，已退回积分：'+err.message);return}if(DRAMA===proj){renderShots();renderSteps()}toast('已重新生成分镜')})){b.disabled=true;b.textContent='生成中…'}};
 const totalDur=(arr=dr().shots)=>arr.reduce((a,s)=>a+(Math.max(1,+s.dur||1)),0);
 function renderStats(){
   const st=dr(),tot=totalDur(),target=st.len,ok=Math.abs(tot-target)<=target*.15;
@@ -643,7 +755,7 @@ function renderShots(){
   $$('.shot',S).forEach((el,i)=>paintShot($('canvas',el),dr().shots[i],i+1,170,{tags:true,onImg:repaintCur}));
 }
 function repaintCur(){const st=dr();if(st.step===1)renderLooks();else if(st.step===2)renderShots();else if(st.step===3)renderKf();else if(st.step===4)renderStudio()}
-function shotEdited(s){if(s.kf!=='none'||s.video!=='none'){s.kf='none';s.video='none'}s.patches=[];delete s.prompt}
+function shotEdited(s){if(s.kf!=='none'||s.video!=='none'){s.kf='none';s.video='none'}s.patches=[];delete s.prompt;delete s.kfUrl;delete s.videoUrl}
 $('#shots').addEventListener('input',e=>{
   const el=e.target.closest('.shot'),k=e.target.dataset.k;if(!el||!k)return;const s=dr().shots.find(x=>x.id===el.dataset.id);
   s[k]=k==='dur'?Math.max(1,+e.target.value||1):e.target.value;shotEdited(s);touch(DRAMA);
@@ -664,7 +776,7 @@ $('#toKf').onclick=()=>{if(!dr().shots.length){toast('至少需要一个镜头')
 function renderKf(){
   const st=dr(),S=st.shots,ok=S.filter(s=>s.kf==='ok'),ready=S.filter(s=>s.kf==='ready').length,none=S.filter(s=>s.kf==='none');
   const genCost=none.length*PRICING.keyframe;
-  $('#kfStats').innerHTML=`<div class="stat"><span>已确认</span><b style="color:var(--ok)">${ok.length}<span style="color:var(--mute);font-size:13px"> / ${S.length}</span></b></div><div class="stat"><span>待确认</span><b>${ready}</b></div><div class="stat"><span>未生成</span><b>${none.length}</b></div><div class="stat"><span>确认后视频预计</span><b>${num(totalDur(ok)*PRICING.videoPerSec)}<span style="color:var(--mute);font-size:13px"> 积分</span></b></div>`;
+  $('#kfStats').innerHTML=`<div class="stat"><span>已确认</span><b style="color:var(--ok)">${ok.length}<span style="color:var(--mute);font-size:13px"> / ${S.length}</span></b></div><div class="stat"><span>待确认</span><b>${ready}</b></div><div class="stat"><span>未生成</span><b>${none.length}</b></div><div class="stat"><span>确认后视频预计</span><b>${num(videoCost(ok))}<span style="color:var(--mute);font-size:13px"> 积分</span></b></div>`;
   $('#kfOkAll').disabled=!ready;$('#toVideo').disabled=!ok.length;$('#kfGenAll').disabled=!none.length||genCost>APP.credits;
   $('#kfGenAll').innerHTML=`生成全部关键帧${none.length?` <span class="cost">· ${num(genCost)} 积分</span>`:''}`;
   const G=$('#kfGrid');G.classList.toggle('wide',st.ratio==='16:9');
@@ -684,11 +796,12 @@ function kfRender(proj){if(DRAMA===proj&&proj.state.step===3)onFrame('kf',render
 function startKf(proj,shots,kind,extra={}){
   const cost=shots.length*(kind==='inpaint'?PRICING.inpaint:PRICING.keyframe);if(!spend(proj,cost))return false;
   const jobName={new:'绘制中',redraw:'重画中',inpaint:'局部重绘中'}[kind];
-  shots.forEach(s=>{s.kfPrev=s.kf==='run'?s.kfPrev:s.kf;s.kf='run';s.kp=0;s.kfJob=jobName;s.video='none'});
+  shots.forEach(s=>{s.kfPrev=s.kf==='run'?s.kfPrev:s.kf;s.kf='run';s.kp=0;s.kfJob=jobName;s.video='none';delete s.videoUrl});const unit=kind==='inpaint'?PRICING.inpaint:PRICING.keyframe;
   const q=[...shots];let active=0;
   const next=()=>{while(active<3&&q.length){const s=q.shift();active++;
     API.generateKeyframe({shot:s,prompt:s.prompt||defaultPrompt(s),region:kind==='inpaint'?extra.region:null,note:extra.note||''},p=>{s.kp=p*100;kfRender(proj)}).then(r=>{
-      if(kind==='inpaint')(s.patches=s.patches||[]).push({...extra.region,seed:r.seed,note:extra.note||''});else{s.seed=r.seed;s.patches=[]}
+      if(r.error){s.kf=s.kfPrev||'none';delete s.kfPrev;delete s.kfJob;refund(proj,unit);toast('关键帧生成失败，已退回积分：'+r.error);active--;kfRender(proj);if(!q.length&&!active)touch(proj);else next();return}
+      if(kind==='inpaint')(s.patches=s.patches||[]).push({...extra.region,seed:r.seed,url:r.url,note:extra.note||''});else{s.seed=r.seed;s.kfUrl=r.url;s.patches=[]}
       s.kfVer=(s.kfVer||0)+1;s.kf='ready';delete s.kfPrev;delete s.kfJob;active--;kfRender(proj);
       if(!q.length&&!active)touch(proj);else next()})}};
   next();kfRender(proj);return cost;
@@ -699,7 +812,7 @@ $('#kfGrid').onclick=e=>{
   const b=e.target.closest('[data-k]');if(!b)return;const proj=DRAMA,S=dr().shots,s=S.find(x=>x.id===b.closest('.kf').dataset.id),no=pad2(S.indexOf(s)+1);
   const k=b.dataset.k;
   if(k==='ok'){s.kf='ok';touch(proj);renderKf()}
-  else if(k==='undo'){s.kf='ready';s.video='none';touch(proj);renderKf()}
+  else if(k==='undo'){s.kf='ready';s.video='none';delete s.videoUrl;touch(proj);renderKf()}
   else if(k==='edit')openEditor(s);
   else if(k==='gen'){const c=startKf(proj,[s],'new');if(c)logHistory(proj,`生成关键帧 S${no}`,s.desc,c)}
   else if(k==='redo'){const c=startKf(proj,[s],'redraw');if(c)logHistory(proj,`重画关键帧 S${no}`,s.desc,c)}
@@ -745,18 +858,21 @@ $('#edGo').onclick=()=>{
 
 // ---- 视频生成
 const playList=()=>dr().shots.filter(s=>s.kf==='ok');
-const videoCost=arr=>totalDur(arr)*PRICING.videoPerSec;
+const vModel=()=>dr().videoModel==='kling'?'kling':'seedance';
+const shotVCost=(s,m=vModel())=>m==='kling'?(s.dur>5?2:1)*PRICING.klingPer5s:Math.max(2,Math.min(12,Math.round(s.dur)))*PRICING.seedancePerSec;
+const videoCost=(arr,m)=>arr.reduce((a,s)=>a+shotVCost(s,m),0);
 function renderStudio(){
   const st=dr(),S=st.shots,ok=playList(),done=ok.filter(s=>s.video==='done').length,todo=ok.filter(s=>s.video!=='done'),busy=S.some(s=>s.video==='run'||s.video==='wait');
   $('#screen').classList.toggle('wide',st.ratio==='16:9');
   $('#vHint').textContent=`${ok.length} 个已确认镜头 · ${totalDur(ok)} 秒 · 已完成 ${done}/${ok.length}${ok.length<S.length?` · ${S.length-ok.length} 镜关键帧未确认，不会生成`:''}`;
   $('#exportVideo').disabled=!(ok.length&&done===ok.length);$('#playBtn').disabled=!done;
   const cost=videoCost(todo);
+  $$('#vModel .vm').forEach(b=>{const m=b.dataset.v,off=LIVE.on&&!LIVE.models[m];b.setAttribute('aria-pressed',m===vModel());b.disabled=busy||off;b.title=off?'服务器还没有配置这个模型的密钥':'';$('[data-pr]',b).textContent=m==='kling'?PRICING.klingPer5s+' 积分/5秒':PRICING.seedancePerSec+' 积分/秒'});
   $('#genVideo').disabled=!todo.length||busy||cost>APP.credits;
   $('#genVideo').innerHTML=busy?'生成中…':`生成视频${todo.length?` <span class="cost">· ${num(cost)} 积分</span>`:''}`;
   $('#queue').innerHTML=S.map((s,i)=>{
     const locked=s.kf!=='ok';
-    const stt=locked?'<span class="st-lock">关键帧未确认</span>':s.video==='done'?'<span class="st-done">已完成</span>':s.video==='run'?`<span class="st-run">生成中 ${Math.floor(s.p||0)}%</span><div class="bar"><i style="width:${s.p||0}%"></i></div>`:s.video==='wait'?'<span class="st-wait">排队中</span>':`<span class="st-wait">待生成 · ${s.dur*PRICING.videoPerSec} 积分</span>`;
+    const stt=locked?'<span class="st-lock">关键帧未确认</span>':s.video==='done'?'<span class="st-done">已完成</span>':s.video==='run'?`<span class="st-run">生成中 ${Math.floor(s.p||0)}%</span><div class="bar"><i style="width:${s.p||0}%"></i></div>`:s.video==='wait'?'<span class="st-wait">排队中</span>':`<span class="st-wait">待生成 · ${shotVCost(s)} 积分</span>`;
     return `<div class="q ${locked?'locked':''}" data-i="${i}"><span class="mono">${pad2(i+1)}</span><div class="q-thumb"><canvas></canvas></div><div class="q-desc">${esc(s.desc)}<small>${s.scale} · ${s.cam} · ${s.dur}s</small></div><div class="q-state">${stt}</div></div>`}).join('');
   $$('#queue .q').forEach(q=>paintShot($('canvas',q),S[q.dataset.i],+q.dataset.i+1,110));
   renderTimeline();sizePlayer();drawPlayer();renderSteps();
@@ -772,30 +888,50 @@ function fmt(s){s=Math.floor(s);return pad2(Math.floor(s/60))+':'+pad2(s%60)}
 function sizePlayer(){const cv=$('#pv');if(dr().ratio==='16:9'){if(cv.width!==640){cv.width=640;cv.height=360}}else if(cv.width!==360){cv.width=360;cv.height=640}}
 function shotAt(L,time){let acc=0;for(let i=0;i<L.length;i++){const d=Math.max(1,+L[i].dur||1);if(time<acc+d||i===L.length-1)return{i,t:Math.min(1,Math.max(0,(time-acc)/d))};acc+=d}return{i:0,t:0}}
 function drawPlayer(){
-  const cv=$('#pv'),c=cv.getContext('2d'),L=playList();
+  const cv=$('#pv'),c=cv.getContext('2d'),L=playList(),vid=$('#pvVid');vid.hidden=true;
   const msg=t=>{c.fillStyle='#0C0D10';c.fillRect(0,0,cv.width,cv.height);c.fillStyle='#8A8F96';c.font='15px '+FONT;c.textAlign='center';c.fillText(t,cv.width/2,cv.height/2)};
   if(!L.length){msg('先在上一步确认关键帧');return}
   const {i,t}=shotAt(L,dr().time),s=L[i],no=dr().shots.indexOf(s)+1;
   if(s.video!=='done'){msg(s.video==='run'?`镜头 ${no} 生成中…`:`镜头 ${no} 尚未生成`);return}
+  if(s.videoUrl){showVid(vid,s,t);return}
   drawFrame(c,cv.width,cv.height,s,t,{no,meta:true,sub:dr().voice!=='无'});
 }
+function showVid(v,s,t){
+  if(v.dataset.src!==s.videoUrl){v.dataset.src=s.videoUrl;v.src=s.videoUrl}
+  v.hidden=false;const want=t*Math.max(1,+s.dur||1),lim=(v.duration||want+1)-.05;
+  if(playing){if(v.paused)v.play().catch(()=>{});if(Math.abs(v.currentTime-want)>.4&&want<lim)v.currentTime=want}
+  else{if(!v.paused)v.pause();if(Math.abs(v.currentTime-want)>.05){try{v.currentTime=Math.max(0,Math.min(want,lim))}catch(e){}}}
+}
 let raf,last,playing=false;
-function stopPlay(){playing=false;cancelAnimationFrame(raf);$('#playBtn').textContent='播放'}
+function stopPlay(){playing=false;cancelAnimationFrame(raf);$('#playBtn').textContent='播放';const v=$('#pvVid');if(v&&!v.paused)v.pause()}
 $('#playBtn').onclick=()=>{if(playing){stopPlay();return}const tot=totalDur(playList());if(dr().time>=tot-.05)dr().time=0;playing=true;$('#playBtn').textContent='暂停';last=performance.now();
   const loop=now=>{dr().time+=(now-last)/1000;last=now;if(dr().time>=tot){dr().time=tot;stopPlay()}movePH();drawPlayer();if(playing)raf=requestAnimationFrame(loop)};raf=requestAnimationFrame(loop)};
 $('#vVoice').onchange=e=>{dr().voice=e.target.value;touch(DRAMA);drawPlayer()};
+$('#vModel').onclick=e=>{const b=e.target.closest('.vm');if(!b||b.disabled)return;dr().videoModel=b.dataset.v;touch(DRAMA);renderStudio()};
 $('#genVideo').onclick=()=>{
-  const proj=DRAMA,todo=playList().filter(s=>s.video!=='done');if(!todo.length)return;
-  const cost=videoCost(todo);if(!spend(proj,cost))return;
+  const proj=DRAMA,m=vModel(),todo=playList().filter(s=>s.video!=='done');if(!todo.length)return;
+  const cost=videoCost(todo,m);if(!spend(proj,cost))return;
   todo.forEach(s=>{s.video='wait';s.p=0});
   const rer=()=>{if(DRAMA===proj&&proj.state.step===4)onFrame('studio',renderStudio)};
-  const q=[...todo];let active=0;
+  const q=[...todo];let active=0,failed=0,back=0,lastErr='';
   const next=()=>{while(active<2&&q.length){const s=q.shift();active++;s.video='run';
-    API.generateVideo(s,p=>{s.p=p*100;rer()}).then(()=>{s.video=s.kf==='ok'?'done':'none';s.p=100;active--;rer();
-      if(!q.length&&!active){touch(proj);if(DRAMA===proj)toast(`全部镜头已生成，消耗 ${num(cost)} 积分`);logHistory(proj,`生成视频 ${todo.length} 镜`,`${totalDur(todo)} 秒 · ${proj.state.title}`,cost)}else next()})}};
+    API.generateVideo(s,m,p=>{s.p=p*100;rer()}).then(r=>{
+      if(r&&r.error){s.video='none';s.p=0;failed++;const c=shotVCost(s,m);back+=c;refund(proj,c);lastErr=r.error}
+      else{s.video=s.kf==='ok'?'done':'none';s.p=100;s.vModel=m;if(r&&r.url)s.videoUrl=r.url}
+      active--;rer();
+      if(!q.length&&!active){touch(proj);const ok=todo.length-failed;
+        if(ok)logHistory(proj,`生成视频 ${ok} 镜`,`${m==='kling'?'可灵 2.5 Turbo':'Seedance 1.0 pro-fast'} · ${proj.state.title}`,cost-back);
+        if(DRAMA===proj)toast(failed?`${failed} 个镜头生成失败，已退回 ${num(back)} 积分：${lastErr}`:`全部镜头已生成，消耗 ${num(cost)} 积分`)}
+      else next()})}};
   next();rer();
 };
-$('#exportVideo').onclick=()=>toast('演示版暂不导出。正式版会合成 MP4（含字幕与配音）');
+$('#exportVideo').onclick=async()=>{
+  const L=playList();if(!LIVE.on||!L.every(s=>s.videoUrl)){toast('演示模式不能导出。部署后端并接入视频模型后，可导出 MP4 成片');return}
+  const b=$('#exportVideo');b.disabled=true;b.textContent='合成中…';
+  try{const r=await api('/api/concat',{urls:L.map(s=>s.videoUrl),durs:L.map(s=>s.dur)});saveUrl(r.url,`${dr().title||'短剧'}.mp4`);toast('成片已合成，开始下载')}
+  catch(e){toast(e.message+'，改为逐个下载镜头');L.forEach((s,i)=>setTimeout(()=>saveUrl(s.videoUrl,`S${pad2(dr().shots.indexOf(s)+1)}.mp4`),i*400))}
+  finally{b.textContent='导出成片';renderStudio()}
+};
 $('#pnameDrama').addEventListener('input',e=>{DRAMA.name=e.target.value||'未命名项目';touch(DRAMA)});
 
 /* ================= 项目 / 历史 ================= */
@@ -897,8 +1033,10 @@ function ensureCurrent(){
   if(!SHOP){SHOP=prep(pick('shop')||newProject('shop',{sample:true,name:'示例 · 美妆三件套'}));CANV.clear();renderShopAll()}
   if(!DRAMA){DRAMA=prep(pick('drama')||newProject('drama',{sample:true,name:'示例 · 重回发布会'}));renderDramaAll()}
 }
+$('#gateForm').onsubmit=e=>{e.preventDefault();const v=$('#gateIn').value.trim();if(!v)return;LIVE.token=v;try{localStorage.setItem('hy-token',v)}catch(err){}$('#gate').hidden=true;toast('已保存访问口令')};
 async function init(){
-  await Store.init();
+  await detectLive();
+  await Store.init();applyMode();
   const [dot,txt]=STORE_TXT[Store.mode];$('#cloudDot').className='dot '+dot;$('#cloudTxt').textContent=txt;
   ensureCurrent();renderWallet();$('#bootMsg').remove();
   let v='home';try{v=localStorage.getItem('vs-view')||'home'}catch(e){}

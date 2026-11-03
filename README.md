@@ -1,104 +1,114 @@
 # 绘影 Huiying
 
-**绘**图，成**影**。面向电商和短剧团队的 AI 视觉创作工作台 Demo，包含两个模块：
+**绘**图，成**影**。面向电商和短剧团队的 AI 视觉创作工作台，包含两个模块：
 
 - **电商图片**：批量导入 SKU，按套图方案为每个商品一次生成白底图、主图、场景图，支持按平台批量改尺寸、批量换风格。
-- **短剧生成**：故事设定 + 角色卡 → 分镜脚本 → 关键帧确认 → 逐镜生成视频并预览成片。
+- **短剧生成**：故事设定 + 角色卡 → 分镜脚本 → 关键帧确认 → 逐镜生成视频，合成 MP4 成片。
 
-当前版本不接任何模型。图片和视频都用浏览器 Canvas 模拟生成，用来验证交互流程和信息结构。
+## 使用的模型
+
+| 环节 | 模型 | 平台 | 参考成本 | 本产品定价 |
+| --- | --- | --- | --- | --- |
+| 电商图、关键帧、局部重绘 | **Seedream 4.0** | 火山方舟 | 0.20 元/张 | 4 积分/张 |
+| 分镜脚本 | **DeepSeek V3.1** | 火山方舟 | 输入 4 元 / 输出 12 元（每百万 tokens），一次分镜约 0.02 元 | 2 积分/次 |
+| 视频 · 标准档（默认） | **Seedance 1.0 pro-fast** 720p | 火山方舟 | 约 1.5–2 元/条 | 8 积分/秒 |
+| 视频 · 精品档 | **可灵 2.5 Turbo** 1080p | 可灵开放平台 | 约 2.5 元/5 秒 | 50 积分/5 秒 |
+
+1 积分 = 0.1 元，按成本约 2 倍定价，可在 `app.js` 的 `PRICING` 里调整。火山方舟的三个模型共用一个 API Key。
+
+## 两种运行方式
+
+| | 演示模式 | 正式模式 |
+| --- | --- | --- |
+| 怎么启动 | 任意静态服务器、GitHub Pages、Claude Artifact | `npm start`（运行 `server/index.mjs`） |
+| 生成结果 | 浏览器 Canvas 模拟 | 调用上表的真实模型 |
+| 导出 | 不可用 | 原尺寸 PNG；短剧用 ffmpeg 合成 MP4 |
+
+页面启动时会请求 `/api/health`，能连上后端就自动切到正式模式。首页和各模块右上角会显示「已接入模型」。
+
+## 部署正式模式
+
+需要 Node.js 18 以上。合成短剧成片还需要 ffmpeg，没装也能用，只是导出时改为逐个下载镜头。
+
+```bash
+git clone https://github.com/Qi0618/AIGC-zhenjian.git
+cd AIGC-zhenjian
+cp .env.example .env      # 填写密钥，见下文
+npm start                 # 默认 http://localhost:8787
+```
+
+后端没有第三方依赖，不需要 `npm install`。
+
+### 填写 .env
+
+1. **火山方舟**：在 [火山方舟控制台](https://console.volcengine.com/ark) 创建 API Key，填到 `ARK_API_KEY`。在「开通管理」里开通 Seedream 4.0、DeepSeek V3.1、Seedance 1.0 pro-fast。
+   - 模型 ID 会随版本更新，`.env.example` 里是默认值，以控制台「模型广场」显示的为准。
+   - 也可以填自建推理接入点的 `ep-xxxx`。
+2. **可灵**（可选，精品档用）：在 [可灵开放平台](https://app.klingai.com/cn/dev) 创建 AccessKey / SecretKey，填到 `KLING_ACCESS_KEY` 和 `KLING_SECRET_KEY`。不填的话，视频模型里的可灵选项会置灰。
+3. **ACCESS_TOKEN**：部署到公网前一定要设置。设置后打开网页要先输入口令，防止别人消耗你的模型额度。
+
+生成的图片和视频保存在 `data/files/`（可用 `DATA_DIR` 修改）。模型返回的临时链接 24 小时就会失效，所以后端会先下载到本地再返回给页面。
+
+### 后端接口
+
+| 接口 | 作用 | 上游 |
+| --- | --- | --- |
+| `GET /api/health` | 检测后端和各模型是否已配置 | — |
+| `POST /api/image` | `{prompt, images[], width, height}` → `{url}` | Seedream 4.0 `images/generations` |
+| `POST /api/storyboard` | `{story, enums}` → `{shots}` | DeepSeek V3.1 `chat/completions` |
+| `POST /api/video` | `{provider: seedance\|kling, image, prompt, duration}` → `{id}` | Seedance `contents/generations/tasks` / 可灵 `v1/videos/image2video` |
+| `GET /api/video/:id` | 查询任务进度，完成后返回 `{url}` | 同上 |
+| `POST /api/concat` | `{urls, durs}` → 合成后的 `{url}` | 本地 ffmpeg |
+
+#### 实现说明
+
+- **生图尺寸**：Seedream 4.0 要求总像素在 1280×720 到 4096×4096 之间。后端先按目标比例生成高清图，前端再精确裁成平台尺寸，比如 800×800。
+- **商品一致性**：生成电商图时，SKU 原图作为参考图传给模型，并在提示词里要求保持外观和包装文字不变。批量改尺寸、改风格时，已生成的图也会作为参考图传入。
+- **角色一致性**：生成关键帧时，出镜角色的参考图会一起传入。
+- **局部重绘**：把当前关键帧作为参考图整张重画，再只把框选区域贴回原图，其他部分保持不变。
+- **视频**：已确认的关键帧作为首帧做图生视频。Seedance 支持 2–12 秒。可灵只支持 5 秒和 10 秒，按 5 秒为单位计费；镜头短于成片时长时，合成时会裁到分镜时长。
+- **失败处理**：生成失败的任务会自动退回积分，并提示失败原因。
 
 ## 功能一览
 
 ### 电商图片
-- 批量上传商品图，每张图自动成为一个 SKU，可补充名称、卖点、到手价
+- 批量上传商品图，每张图自动成为一个 SKU，可补充名称、卖点、到手价，主图会把这些文字排进画面
 - 套图方案：图片类型多选 × 尺寸多选 × 每组张数，生成前显示总张数和预计积分
-- 风格选择带示例图，示例用当前选中的商品实时渲染
+- 风格选择带示例图
 - 7 个平台尺寸预设（淘宝/天猫、京东、详情页、小红书、抖音、亚马逊、店铺横幅）+ 自定义尺寸
-- 结果按 SKU 分组，可筛选、全选本组；批量改尺寸 / 改风格 / 删除
+- 结果按 SKU 分组，可筛选、全选本组；批量改尺寸 / 改风格 / 导出 / 删除
 
 ### 短剧生成
 - 题材示例（都市逆袭、甜宠、悬疑），单集时长与镜头数可调
-- 画面比例 9:16 / 16:9，画风（写实 / 电影感 / 动漫）选择带示例图
-- 角色卡：姓名、身份、外形、主色、参考图，分镜中按角色选择出镜，保证前后一致
-- 分镜可逐镜编辑景别、运镜、光线、时长、画面描述、台词，并显示总时长与目标时长是否匹配
+- 画面比例 9:16 / 16:9，画风（写实 / 电影感 / 动漫）
+- 角色卡：姓名、身份、外形、主色、参考图
+- 分镜可逐镜编辑景别、运镜、光线、时长、画面描述、台词
 - 关键帧确认：确认 / 重画 / 改提示词重画 / 框选区域局部重绘；只有确认过的镜头会进入视频生成
-- 视频生成队列（并发 2）、时间轴、带运镜和字幕的成片预览
+- 视频模型二选一（Seedance 标准档 / 可灵精品档），生成队列并发 2，时间轴预览，导出 MP4
 
-### 界面
-- 首页：两个模块的入口卡、最近项目、灵感画廊（用示例项目实时渲染的样张）
-- 顶部导航 + 全宽工作区；电商配置栏与结果工具栏滚动时吸附
-- 暗色优先的设计，青→蓝→紫渐变品牌色；浅色主题同样适配，默认跟随系统，右上角可切换
-
-### 管理
-- 项目：两个模块各自的项目列表，状态自动保存
-- 历史记录：每次生成任务的内容和积分消耗，可跳回对应项目
-- 积分：演示额度 3000，生成前显示预估，余额不足时拦截
-
-## 本地运行
-
-不需要构建，任意静态服务器即可：
-
-```bash
-# 任选其一
-npx serve .
-python3 -m http.server 8080
-```
-
-然后打开 `http://localhost:8080`（或命令输出的地址）。也可以直接双击 `index.html` 打开，但部分浏览器在 `file://` 下会限制本地存储。
-
-## 部署到 GitHub Pages
-
-1. 把本目录推到 GitHub 仓库的默认分支
-2. 仓库 **Settings → Pages**，Source 选 **Deploy from a branch**，分支选 `main`、目录选 `/ (root)`
-3. 保存后稍等片刻，页面会出现在 `https://<用户名>.github.io/<仓库名>/`
+### 界面与管理
+- 左侧导航，首页有模块入口、最近项目、灵感画廊
+- 暗色 + 青蓝紫渐变品牌色，浅色主题同样适配；默认跟随系统，右上角一键切换
+- 项目自动保存；历史记录每次生成的内容和积分消耗
 
 ## 数据存储
 
-| 运行环境 | 项目 / 历史 / 积分 | 上传的图片 |
-| --- | --- | --- |
-| 普通浏览器（本地或 GitHub Pages） | `localStorage` | IndexedDB |
-| Claude Artifact 内 | Claude 提供的云端数据库 | Claude 提供的文件存储 |
-| 以上都不可用 | 仅保存在本次会话 | 仅保存在本次会话 |
-
-存储逻辑集中在 `app.js` 的 `Store` 对象里。换成自己的后端时，实现同名方法即可：
-`init`、`saveProject`、`deleteProject`、`addHistory`、`saveWallet`、`putImage`。
-
-## 接入模型
-
-所有生成调用都集中在 `app.js` 顶部的 `API` 对象。把 4 个函数换成真实接口，页面其余部分不用改。每个函数返回 Promise，`onProgress` 接收 0~1 的进度。
-
-| 函数 | 入参 | 当前返回 | 接入后建议返回 |
+| 运行环境 | 项目 / 历史 / 积分 | 上传的图片 | 生成的图片和视频 |
 | --- | --- | --- | --- |
-| `generateImages(jobs, onProgress)` | `[{skuId, type, style, size, seed}]` | 同一批 job（带 seed） | 每个 job 附加图片 `url` |
-| `generateStoryboard(story)` | `{genre, title, syn, chars, nShots, len}` | 镜头数组 | 由大模型生成的镜头数组，字段同 `toShot()` |
-| `generateKeyframe(req, onProgress)` | `{shot, prompt, region, note}`，`region` 为空表示整张重画 | `{seed}` | `{url}`；`region` 为 0~1 的归一化坐标，可直接用于 inpainting mask |
-| `generateVideo(shot, onProgress)` | 已确认关键帧的镜头 | `{ok}` | `{url}`，图生视频，首帧用关键帧 |
+| 正式模式 | 浏览器 `localStorage` | IndexedDB | 服务器 `data/files/` |
+| 演示模式（浏览器） | `localStorage` | IndexedDB | 不产生文件 |
+| Claude Artifact 内 | Claude 云端数据库 | Claude 文件存储 | 不产生文件 |
 
-接入真实图片后，需要把 `renderImage()` / `drawFrame()` 的 Canvas 绘制换成展示返回的 `url`。
-
-## 积分配置
-
-价格在 `app.js` 的 `PRICING` 里，均为示意值：
-
-```js
-const PRICING = {
-  imageBase: 2,      // 单张电商图
-  imageLarge: 3,     // 长边超过 largeSide 的电商图
-  largeSide: 1500,
-  storyboard: 5,     // 生成一次分镜脚本
-  keyframe: 4,       // 生成或整张重画一张关键帧
-  inpaint: 2,        // 局部重绘一次
-  videoPerSec: 10,   // 视频每秒
-};
-const DEFAULT_CREDITS = 3000; // 演示额度
-```
+目前积分只记在浏览器里，还没有用户账号和真实计费。上线收费前需要补上这两项。
 
 ## 目录结构
 
 ```
 .
-├── index.html   页面结构
-├── styles.css   样式（明暗两套主题，颜色均为 :root 上的 CSS 变量）
-├── app.js       全部逻辑：API 接入点、Store 存储、电商模块、短剧模块、项目与历史
-└── README.md
+├── index.html        页面结构
+├── styles.css        样式（明暗两套主题）
+├── app.js            前端逻辑：模型调用、存储、电商模块、短剧模块、项目与历史
+├── server/index.mjs  后端：托管页面 + 代理模型接口 + 保存生成结果 + 合成成片
+├── .env.example      配置模板
+└── package.json
 ```
