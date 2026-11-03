@@ -9,12 +9,14 @@
 
 | 环节 | 模型 | 平台 | 参考成本 | 本产品定价 |
 | --- | --- | --- | --- | --- |
-| 电商图、关键帧、局部重绘 | **Seedream 4.0** | 火山方舟 | 0.20 元/张 | 4 积分/张 |
-| 分镜脚本 | **DeepSeek V3.1** | 火山方舟 | 输入 4 元 / 输出 12 元（每百万 tokens），一次分镜约 0.02 元 | 2 积分/次 |
-| 视频 · 标准档（默认） | **Seedance 1.0 pro-fast** 720p | 火山方舟 | 约 1.5–2 元/条 | 8 积分/秒 |
+| 电商图、关键帧、局部重绘 | **Seedream 4.0**（20260415 版） | 火山方舟 | 0.20 元/张 | 4 积分/张 |
+| 分镜脚本 | **DeepSeek V4.1 Flash** | 火山方舟 | 输入 1–2 元 / 输出 4–8 元（每百万 tokens，工作日高峰时段贵一倍），一次分镜不到 0.01 元 | 2 积分/次 |
+| 视频 · 标准档（默认） | **Seedance 2.0 mini** 720p | 火山方舟 | 0.5 元/秒，单条 4–15 秒 | 10 积分/秒 |
 | 视频 · 精品档 | **可灵 2.5 Turbo** 1080p | 可灵开放平台 | 约 2.5 元/5 秒 | 50 积分/5 秒 |
 
 1 积分 = 0.1 元，按成本约 2 倍定价，可在 `app.js` 的 `PRICING` 里调整。火山方舟的三个模型共用一个 API Key。
+
+> 2026-09 起火山方舟停止开通 Seedream 4.0（250828 版）、Seedance 1.0 pro-fast，DeepSeek V3.1 已于 2026-03 下线，本项目已按官方迁移建议换成上表型号。
 
 ## 两种运行方式
 
@@ -41,7 +43,7 @@ npm start                 # 默认 http://localhost:8787
 
 ### 填写 .env
 
-1. **火山方舟**：在 [火山方舟控制台](https://console.volcengine.com/ark) 创建 API Key，填到 `ARK_API_KEY`。在「开通管理」里开通 Seedream 4.0、DeepSeek V3.1、Seedance 1.0 pro-fast。
+1. **火山方舟**：在 [火山方舟控制台](https://console.volcengine.com/ark) 创建 API Key，填到 `ARK_API_KEY`。在「开通管理」里开通 Seedream 4.0、DeepSeek V4.1 Flash、Seedance 2.0 mini。
    - 模型 ID 会随版本更新，`.env.example` 里是默认值，以控制台「模型广场」显示的为准。
    - 也可以填自建推理接入点的 `ep-xxxx`。
 2. **可灵**（可选，精品档用）：在 [可灵开放平台](https://app.klingai.com/cn/dev) 创建 AccessKey / SecretKey，填到 `KLING_ACCESS_KEY` 和 `KLING_SECRET_KEY`。不填的话，视频模型里的可灵选项会置灰。
@@ -55,7 +57,7 @@ npm start                 # 默认 http://localhost:8787
 | --- | --- | --- |
 | `GET /api/health` | 检测后端和各模型是否已配置 | — |
 | `POST /api/image` | `{prompt, images[], width, height}` → `{url}` | Seedream 4.0 `images/generations` |
-| `POST /api/storyboard` | `{story, enums}` → `{shots}` | DeepSeek V3.1 `chat/completions` |
+| `POST /api/storyboard` | `{story, enums}` → `{shots}` | DeepSeek V4.1 Flash `chat/completions` |
 | `POST /api/video` | `{provider: seedance\|kling, image, prompt, duration}` → `{id}` | Seedance `contents/generations/tasks` / 可灵 `v1/videos/image2video` |
 | `GET /api/video/:id` | 查询任务进度，完成后返回 `{url}` | 同上 |
 | `POST /api/concat` | `{urls, durs}` → 合成后的 `{url}` | 本地 ffmpeg |
@@ -66,7 +68,7 @@ npm start                 # 默认 http://localhost:8787
 - **商品一致性**：生成电商图时，SKU 原图作为参考图传给模型，并在提示词里要求保持外观和包装文字不变。批量改尺寸、改风格时，已生成的图也会作为参考图传入。
 - **角色一致性**：生成关键帧时，出镜角色的参考图会一起传入。
 - **局部重绘**：把当前关键帧作为参考图整张重画，再只把框选区域贴回原图，其他部分保持不变。
-- **视频**：已确认的关键帧作为首帧做图生视频。Seedance 支持 2–12 秒。可灵只支持 5 秒和 10 秒，按 5 秒为单位计费；镜头短于成片时长时，合成时会裁到分镜时长。
+- **视频**：已确认的关键帧作为首帧做图生视频。Seedance 2.0 mini 支持 4–15 秒，短于 4 秒的镜头按 4 秒生成和计费。可灵只支持 5 秒和 10 秒，按 5 秒为单位计费；镜头短于成片时长时，合成时会裁到分镜时长。
 - **失败处理**：生成失败的任务会自动退回积分，并提示失败原因。
 
 ## 功能一览

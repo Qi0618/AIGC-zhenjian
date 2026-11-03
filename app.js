@@ -32,7 +32,7 @@ const rafFlags={};function onFrame(key,fn){if(rafFlags[key])return;rafFlags[key]
 
 /* =====================================================================
    模型接入：部署了后端（server/index.mjs）时走真实模型，否则走画布演示。
-   生图 Seedream 4.0 · 分镜 DeepSeek V3.1 · 视频 Seedance 1.0 pro-fast / 可灵 2.5 Turbo
+   生图 Seedream 4.0 · 分镜 DeepSeek V4.1 Flash · 视频 Seedance 2.0 mini / 可灵 2.5 Turbo
    ===================================================================== */
 const LIVE={on:false,auth:false,ffmpeg:false,models:{},token:''};
 try{LIVE.token=localStorage.getItem('hy-token')||''}catch(e){}
@@ -127,14 +127,14 @@ const API={
 function mockProgress(ms,cb){return new Promise(res=>{const t0=performance.now();const tick=()=>{const p=Math.min(1,(performance.now()-t0)/ms);cb&&cb(p);if(p>=1)res();else setTimeout(tick,110)};tick()})}
 
 /* 价格（单位：积分，1 积分 = 0.1 元）。按模型成本约 2 倍定价：
-   Seedream 4.0 0.2 元/张 · DeepSeek V3.1 每次分镜约 0.02 元 · Seedance pro-fast 720p 约 0.3~0.4 元/秒 · 可灵 2.5 Turbo 1080p 约 2.5 元/5 秒 */
-const PRICING={image:4,storyboard:2,keyframe:4,inpaint:4,seedancePerSec:8,klingPer5s:50};
+   Seedream 4.0 0.2 元/张 · DeepSeek V4.1 Flash 每次分镜不到 0.01 元 · Seedance 2.0 mini 720p 0.5 元/秒（最短 4 秒） · 可灵 2.5 Turbo 1080p 约 2.5 元/5 秒 */
+const PRICING={image:4,storyboard:2,keyframe:4,inpaint:4,seedancePerSec:10,klingPer5s:50};
 function refund(p,n){if(n<=0)return;APP.credits+=n;p.spent=Math.max(0,(p.spent||0)-n);Store.saveWallet().catch(()=>{});renderWallet()}
 function saveUrl(url,name){const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove()}
 function showGate(){$('#gate').hidden=false;setTimeout(()=>$('#gateIn').focus(),50)}
 function applyMode(){
   if(!LIVE.on)return;const M=LIVE.models,any=M.image||M.llm||M.seedance;
-  $('#modeKicker').innerHTML=any?'<b>已接入</b>Seedream 4.0 · DeepSeek V3.1 · Seedance · 可灵':'<b>待配置</b>后端已连接，还没有填写模型密钥';
+  $('#modeKicker').innerHTML=any?'<b>已接入</b>Seedream 4.0 · DeepSeek V4.1 Flash · Seedance · 可灵':'<b>待配置</b>后端已连接，还没有填写模型密钥';
   $$('.modeBadge').forEach(b=>b.innerHTML=any?'<b style="color:var(--ok)">●</b> 已接入模型':'<b>●</b> 后端未配置密钥');
   $$('#modelChips i[data-m]').forEach(i=>i.textContent=M[i.dataset.m]?'已接入':'未配置');
   if(LIVE.auth&&!LIVE.token)showGate();
@@ -859,7 +859,7 @@ $('#edGo').onclick=()=>{
 // ---- 视频生成
 const playList=()=>dr().shots.filter(s=>s.kf==='ok');
 const vModel=()=>dr().videoModel==='kling'?'kling':'seedance';
-const shotVCost=(s,m=vModel())=>m==='kling'?(s.dur>5?2:1)*PRICING.klingPer5s:Math.max(2,Math.min(12,Math.round(s.dur)))*PRICING.seedancePerSec;
+const shotVCost=(s,m=vModel())=>m==='kling'?(s.dur>5?2:1)*PRICING.klingPer5s:Math.max(4,Math.min(15,Math.round(s.dur)))*PRICING.seedancePerSec;
 const videoCost=(arr,m)=>arr.reduce((a,s)=>a+shotVCost(s,m),0);
 function renderStudio(){
   const st=dr(),S=st.shots,ok=playList(),done=ok.filter(s=>s.video==='done').length,todo=ok.filter(s=>s.video!=='done'),busy=S.some(s=>s.video==='run'||s.video==='wait');
@@ -920,7 +920,7 @@ $('#genVideo').onclick=()=>{
       else{s.video=s.kf==='ok'?'done':'none';s.p=100;s.vModel=m;if(r&&r.url)s.videoUrl=r.url}
       active--;rer();
       if(!q.length&&!active){touch(proj);const ok=todo.length-failed;
-        if(ok)logHistory(proj,`生成视频 ${ok} 镜`,`${m==='kling'?'可灵 2.5 Turbo':'Seedance 1.0 pro-fast'} · ${proj.state.title}`,cost-back);
+        if(ok)logHistory(proj,`生成视频 ${ok} 镜`,`${m==='kling'?'可灵 2.5 Turbo':'Seedance 2.0 mini'} · ${proj.state.title}`,cost-back);
         if(DRAMA===proj)toast(failed?`${failed} 个镜头生成失败，已退回 ${num(back)} 积分：${lastErr}`:`全部镜头已生成，消耗 ${num(cost)} 积分`)}
       else next()})}};
   next();rer();

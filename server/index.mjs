@@ -15,9 +15,9 @@ const CFG = {
   port: +(process.env.PORT || 8787),
   arkKey: process.env.ARK_API_KEY || '',
   arkBase: (process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/$/, ''),
-  imageModel: process.env.ARK_IMAGE_MODEL || 'doubao-seedream-4-0-250828',
-  llmModel: process.env.ARK_LLM_MODEL || 'deepseek-v3-1-250821',
-  seedanceModel: process.env.ARK_VIDEO_MODEL || 'doubao-seedance-1-0-pro-fast-251015',
+  imageModel: process.env.ARK_IMAGE_MODEL || 'doubao-seedream-4-0-20260415',
+  llmModel: process.env.ARK_LLM_MODEL || 'deepseek-v4-1-flash-260910',
+  seedanceModel: process.env.ARK_VIDEO_MODEL || 'doubao-seedance-2-0-mini-260615',
   seedanceRes: process.env.ARK_VIDEO_RESOLUTION || '720p',
   klingAk: process.env.KLING_ACCESS_KEY || '',
   klingSk: process.env.KLING_SECRET_KEY || '',
@@ -103,7 +103,7 @@ async function genImage({ prompt, images = [], width = 1024, height = 1024 }) {
   return { url, model: CFG.imageModel };
 }
 
-/* ---------------- 分镜脚本：DeepSeek V3.1 ---------------- */
+/* ---------------- 分镜脚本：DeepSeek V4.1 Flash ---------------- */
 async function genStoryboard({ story, enums }) {
   need(CFG.arkKey, '火山方舟 ARK_API_KEY');
   const s = story || {}; const E = enums || {};
@@ -140,7 +140,7 @@ ${chars}
   return { shots, usage: j.usage, model: CFG.llmModel };
 }
 
-/* ---------------- 视频：Seedance 1.0 pro-fast / 可灵 2.5 Turbo ---------------- */
+/* ---------------- 视频：Seedance 2.0 mini / 可灵 2.5 Turbo ---------------- */
 function klingJwt() {
   const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url'); const now = Math.floor(Date.now() / 1000);
   const head = b64({ alg: 'HS256', typ: 'JWT' }), body = b64({ iss: CFG.klingAk, exp: now + 1800, nbf: now - 5 });
@@ -166,12 +166,12 @@ async function createVideo({ provider = 'seedance', image, prompt = '', duration
     upstreamId = j.data?.task_id;
   } else {
     need(CFG.arkKey, '火山方舟 ARK_API_KEY');
-    const dur = Math.max(2, Math.min(12, Math.round(duration)));
-    // 首帧图已经是目标比例，用 adaptive 让视频跟随首帧比例
-    const text = `${prompt} --resolution ${CFG.seedanceRes} --ratio adaptive --duration ${dur} --watermark false`;
+    // Seedance 2.0 mini 支持 4~15 秒；镜头更短时生成 4 秒，合成成片时再裁到分镜时长
+    const dur = Math.max(4, Math.min(15, Math.round(duration)));
     const j = await upstream(CFG.arkBase + '/contents/generations/tasks', {
       method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.arkKey },
-      body: JSON.stringify({ model: CFG.seedanceModel, content: [{ type: 'text', text }, { type: 'image_url', image_url: { url: img }, role: 'first_frame' }] }),
+      // 首帧图已经是目标比例，ratio 用 adaptive 跟随首帧
+      body: JSON.stringify({ model: CFG.seedanceModel, content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: img }, role: 'first_frame' }], resolution: CFG.seedanceRes, ratio: 'adaptive', duration: dur, watermark: false, generate_audio: false }),
     }, 'Seedance');
     upstreamId = j.id;
   }
