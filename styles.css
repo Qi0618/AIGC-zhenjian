@@ -504,6 +504,7 @@ textarea{resize:vertical;min-height:72px;line-height:1.6}
 .khow ol{margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
 .khow a{color:var(--ink);text-decoration:underline}
 .set-note{padding:14px 18px;margin-bottom:14px;font-size:13px}
+.set-storage{margin-top:16px}
 .set-foot{display:flex;align-items:center;justify-content:flex-end;gap:14px;flex-wrap:wrap;margin-top:16px}
 .kicker a,.modeBadge a{color:inherit;text-decoration:underline;cursor:pointer}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}

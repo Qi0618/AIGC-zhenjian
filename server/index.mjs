@@ -157,22 +157,39 @@ async function download(url, ext) {
   return saveFile(buf, ext || extOf(buf));
 }
 // 前端传来的图片：data URI 原样转发；/files/xxx 读本地文件转成 data URI
-async function toDataUri(src) {
+// 上传给模型前先压缩：原图常有 1 MB 左右，网速慢时是「连接失败」的主要原因。
+// 有 ffmpeg 时缩到最长边 maxSide 以内：JPEG 重新压缩；PNG / WebP 只缩小尺寸、保持 PNG（避免透明背景变黑）
+export function shrinkImage(buf, maxSide = 1280) {
+  if (!HAS_FFMPEG || buf.length < 250 * 1024) return Promise.resolve(buf);
+  const jpeg = extOf(buf) === 'jpg';
+  const args = ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0', '-vf', `scale='min(iw,${maxSide})':'min(ih,${maxSide})':force_original_aspect_ratio=decrease`,
+    '-frames:v', '1', '-f', 'image2pipe', ...(jpeg ? ['-c:v', 'mjpeg', '-q:v', '3'] : ['-c:v', 'png']), 'pipe:1'];
+  return new Promise(ok => {
+    const p = spawn(FFMPEG, args), out = [];
+    const timer = setTimeout(() => p.kill('SIGKILL'), 20000);
+    p.stdout.on('data', d => out.push(d)); p.stderr.resume();
+    p.on('error', () => { clearTimeout(timer); ok(buf); });
+    p.on('close', code => { clearTimeout(timer); const r = Buffer.concat(out); ok(code === 0 && r.length && r.length < buf.length ? r : buf); });
+    p.stdin.on('error', () => {}); p.stdin.end(buf);
+  });
+}
+const asDataUri = buf => { const ext = extOf(buf); return `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,` + buf.toString('base64'); };
+async function toDataUri(src, maxSide = 1280) {
   if (!src) return null;
-  if (src.startsWith('data:')) return src;
-  if (src.startsWith('/files/')) {
-    const f = path.join(FILES, path.basename(src)); const buf = await fsp.readFile(f).catch(() => null);
-    if (!buf) throw new HttpError(400, '参考图已不存在：' + src);
-    const ext = extOf(buf); return `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,` + buf.toString('base64');
-  }
   if (/^https?:\/\//.test(src)) return src;
-  // 内置样例（samples/ 下的图）：读文件转成 data URI，样例项目也能作为参考图重新生成
-  if (/^\/?samples\//.test(src)) {
-    const buf = await fsp.readFile(path.join(ROOT, 'samples', path.basename(src))).catch(() => null);
+  let buf;
+  if (src.startsWith('data:')) {
+    const m = /^data:image\/[a-z+]+;base64,(.*)$/s.exec(src); if (!m) return src;
+    buf = Buffer.from(m[1], 'base64');
+  } else if (src.startsWith('/files/')) {
+    buf = await fsp.readFile(path.join(FILES, path.basename(src))).catch(() => null);
+    if (!buf) throw new HttpError(400, '参考图已不存在：' + src);
+  } else if (/^\/?samples\//.test(src)) {
+    // 内置样例（samples/ 下的图）：样例项目也能作为参考图重新生成
+    buf = await fsp.readFile(path.join(ROOT, 'samples', path.basename(src))).catch(() => null);
     if (!buf) throw new HttpError(400, '样例图片不存在：' + src);
-    const ext = extOf(buf); return `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,` + buf.toString('base64');
-  }
-  throw new HttpError(400, '无法识别的图片地址');
+  } else throw new HttpError(400, '无法识别的图片地址');
+  return asDataUri(await shrinkImage(buf, maxSide));
 }
 
 /* ---------------- 生图：Seedream 4.0 ---------------- */
@@ -281,9 +298,10 @@ try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(tasksFile, 
 const saveTasks = () => fsp.writeFile(tasksFile, JSON.stringify(Object.fromEntries(TASKS))).catch(() => {});
 
 // audio=true 时让视频模型同时生成声音（台词配音、口型、环境音），不需要另外接语音合成
-async function createVideo({ provider = 'seedance', image, prompt = '', duration = 5, ratio = '9:16', audio = false }) {
+// fallback：首帧被判「像真人」时，改为纯文字生成要补充的描述（角色外形、画风）；不传就不自动改
+async function createVideo({ provider = 'seedance', image, prompt = '', duration = 5, ratio = '9:16', audio = false, fallback = '' }) {
   const img = await toDataUri(image); if (!img) throw new HttpError(400, '缺少首帧图（已确认的关键帧）');
-  let upstreamId;
+  let upstreamId, textOnly = false;
   if (provider === 'kling') {
     need(CFG.klingAk && CFG.klingSk, '可灵 KLING_ACCESS_KEY / KLING_SECRET_KEY', '视频服务');
     const dur = duration > 5 ? '10' : '5'; // 可灵只支持 5 / 10 秒
@@ -297,16 +315,26 @@ async function createVideo({ provider = 'seedance', image, prompt = '', duration
     need(CFG.arkKey, '火山方舟 ARK_API_KEY', '视频服务');
     // Seedance 2.0 mini 支持 4~15 秒；镜头更短时生成 4 秒，合成成片时再裁到分镜时长
     const dur = Math.max(4, Math.min(15, Math.round(duration)));
-    const j = await upstream(CFG.arkBase + '/contents/generations/tasks', {
+    const submit = (content, r) => upstream(CFG.arkBase + '/contents/generations/tasks', {
       method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.arkKey },
-      // 首帧图已经是目标比例，ratio 用 adaptive 跟随首帧
-      body: JSON.stringify({ model: CFG.seedanceModel, content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: img }, role: 'first_frame' }], resolution: CFG.seedanceRes, ratio: 'adaptive', duration: dur, watermark: false, generate_audio: !!audio }),
+      body: JSON.stringify({ model: CFG.seedanceModel, content, resolution: CFG.seedanceRes, ratio: r, duration: dur, watermark: false, generate_audio: !!audio }),
     }, '视频服务');
+    let j;
+    try {
+      // 首帧图已经是目标比例，ratio 用 adaptive 跟随首帧
+      j = await submit([{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: img }, role: 'first_frame' }], 'adaptive');
+    } catch (e) {
+      // 视频模型不接受「像真人照片」的首帧：改为只按文字生成，画面会和关键帧有差异
+      if (!fallback || !/real person|real human/i.test(e.raw || '')) throw e;
+      console.warn('首帧被判定像真人，改为按文字生成视频');
+      j = await submit([{ type: 'text', text: `${prompt}\n${String(fallback).slice(0, 600)}` }], ratio === '16:9' ? '16:9' : '9:16');
+      textOnly = true;
+    }
     upstreamId = j.id;
   }
   if (!upstreamId) throw new HttpError(502, '视频接口没有返回任务 id');
-  const id = newId(); TASKS.set(id, { provider, upstreamId, at: Date.now(), audio: !!audio && provider !== 'kling' }); saveTasks();
-  return { id };
+  const id = newId(); TASKS.set(id, { provider, upstreamId, at: Date.now(), audio: !!audio && provider !== 'kling', textOnly }); saveTasks();
+  return { id, textOnly };
 }
 // 视频生成好以后在后台下载到本机：网速慢时一段视频要下好几分钟，查询进度不必一直挂着等；同一个任务只下载一次
 const DOWNLOADS = new Map();
@@ -545,6 +573,45 @@ async function uploadImage({ dataUrl }) {
   return { url: await saveFile(buf, m[1] === 'jpeg' ? 'jpg' : m[1]) };
 }
 
+/* ---------------- 存储空间：统计和清理没被使用的文件 ---------------- */
+const TRASH = path.join(CFG.dataDir, 'trash');
+const GRACE_MS = 24 * 3600 * 1000; // 一天内生成的文件不算没用：可能刚生成、还没来得及存进项目
+async function dirStats(dir) {
+  let count = 0, bytes = 0;
+  const walk = async d => { for (const e of await fsp.readdir(d, { withFileTypes: true }).catch(() => [])) { const f = path.join(d, e.name); if (e.isDirectory()) await walk(f); else { count++; bytes += (await fsp.stat(f)).size; } } };
+  await walk(dir); return { count, bytes };
+}
+// 项目、历史、视频任务里提到的 /files/ 文件都算在用
+async function referencedFiles() {
+  const used = new Set(), texts = [];
+  for (const n of await fsp.readdir(PROJ_DIR).catch(() => [])) texts.push(await fsp.readFile(path.join(PROJ_DIR, n), 'utf8').catch(() => ''));
+  for (const f of [HISTORY_FILE, tasksFile]) texts.push(await fsp.readFile(f, 'utf8').catch(() => ''));
+  for (const t of texts) for (const m of t.matchAll(/\/files\/([A-Za-z0-9]+\.[a-z0-9]+)/g)) used.add(m[1]);
+  return used;
+}
+async function unusedFiles() {
+  const used = await referencedFiles(), now = Date.now(), out = [];
+  for (const n of await fsp.readdir(FILES)) {
+    if (used.has(n)) continue;
+    const st = await fsp.stat(path.join(FILES, n)).catch(() => null);
+    if (st && st.isFile() && now - st.mtimeMs > GRACE_MS) out.push({ name: n, size: st.size });
+  }
+  return out;
+}
+async function storageInfo() {
+  const [all, trash, unused] = await Promise.all([dirStats(FILES), dirStats(TRASH), unusedFiles()]);
+  return { dataDir: CFG.dataDir, files: all, unused: { count: unused.length, bytes: unused.reduce((a, f) => a + f.size, 0) }, trash };
+}
+// 不直接删除：移到 data/trash/日期时间/，确认不需要后再手动删
+async function cleanupStorage() {
+  const list = await unusedFiles(); if (!list.length) return { moved: 0, bytes: 0, ...(await storageInfo()) };
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15), dest = path.join(TRASH, stamp);
+  await fsp.mkdir(dest, { recursive: true });
+  let moved = 0, bytes = 0;
+  for (const f of list) { try { await fsp.rename(path.join(FILES, f.name), path.join(dest, f.name)); moved++; bytes += f.size; } catch {} }
+  return { moved, bytes, trashDir: dest, ...(await storageInfo()) };
+}
+
 /* ---------------- 请求来源检查 ---------------- */
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const isLoopback = req => LOOPBACK.has(req.socket.remoteAddress);
@@ -606,6 +673,8 @@ export const server = http.createServer(async (req, res) => {
         if (req.method === 'GET' && p === '/api/settings') return send(res, 200, settingsView());
         if (req.method === 'POST' && p === '/api/settings') return send(res, 200, await saveSettings(await readJson(req)));
         if (req.method === 'POST' && p === '/api/settings/test') return send(res, 200, await testKey(await readJson(req)));
+        if (req.method === 'GET' && p === '/api/settings/storage') return send(res, 200, await storageInfo());
+        if (req.method === 'POST' && p === '/api/settings/storage/cleanup') return send(res, 200, await cleanupStorage());
       }
       if (p === '/api/store' && req.method === 'GET') return send(res, 200, await loadStore());
       if (p.startsWith('/api/store/projects/')) {

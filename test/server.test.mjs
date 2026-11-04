@@ -48,7 +48,14 @@ function startMock() {
           : '```json\n{"shots":[{"scale":"大远景","mood":"sunny","cam":"甩","desc":"雨夜","line":"","dur":99,"cast":[0,5,0]},{"scale":"近景","mood":"night","cam":"推","desc":"特写门缝","dur":3,"cast":[1]}]}\n```';
         return json({ choices: [{ message: { content } }], usage: { total_tokens: 10 } });
       }
-      if (req.method === 'POST' && req.url === '/contents/generations/tasks') return json({ id: 'up-1' });
+      if (req.method === 'POST' && req.url === '/contents/generations/tasks') {
+        // 带首帧且提示词含 REALPERSON 时，模拟「首帧像真人」被拒
+        if (j.content.some(c => c.type === 'image_url') && j.content[0].text.includes('REALPERSON')) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ error: { message: "The request failed because the input image 'content[1]' may contain real person." } }));
+        }
+        return json({ id: 'up-1' });
+      }
       if (req.url === '/contents/generations/tasks/up-1') return json({ status: 'succeeded', content: { video_url: mockUrl + '/v.mp4' } });
       if (req.url === '/v.mp4') { // 模拟下载要花一点时间
         hits['/v.mp4'] = (hits['/v.mp4'] || 0) + 1;
@@ -191,6 +198,16 @@ test('视频：创建任务 → 查询完成 → 下载到本地；任务记录�
   assert.equal((await fetch(base + '/api/video/nope', { headers: H })).status, 404);
 });
 
+test('首帧被判像真人：带了补充描述就改为按文字生成，否则报中文提示', async () => {
+  const img = 'data:image/png;base64,' + PNG.toString('base64');
+  const r = await post('/api/video', { image: img, prompt: 'REALPERSON 林夏走进会场', duration: 4, ratio: '9:16', fallback: '人物：林夏，短发灰西装。写实摄影风格。' });
+  assert.equal(r.status, 200); const j = await r.json(); assert.equal(j.textOnly, true);
+  const last = calls.filter(c => c.url === '/contents/generations/tasks' && c.method === 'POST').pop().body;
+  assert.equal(last.content.length, 1, '不再带首帧'); assert.match(last.content[0].text, /林夏走进会场\n人物：林夏/); assert.equal(last.ratio, '9:16');
+  const r2 = await post('/api/video', { image: img, prompt: 'REALPERSON 林夏走进会场', duration: 4 });
+  assert.equal(r2.status, 400); assert.match((await r2.json()).error, /太像真人/);
+});
+
 test('精品视频未配置时返回 503，提示里不出现模型名', async () => {
   const r = await post('/api/video', { provider: 'kling', image: 'data:image/png;base64,AA==' });
   assert.equal(r.status, 503); const msg = (await r.json()).error;
@@ -321,6 +338,22 @@ test('上传图片：存成文件返回地址，不接受非图片', async () =>
   assert.deepEqual(Buffer.from(await (await fetch(base + url)).arrayBuffer()), PNG);
   assert.equal((await post('/api/upload', { dataUrl: 'data:text/html;base64,PGgxPg==' })).status, 400);
   assert.equal((await post('/api/upload', { dataUrl: 'not a data url' })).status, 400);
+});
+
+test('存储空间：只清理一天前、没有被引用的文件，并且是移到回收站', async () => {
+  const files = path.join(dataDir, 'files'), old = Date.now() / 1000 - 3 * 86400;
+  fs.writeFileSync(path.join(files, 'oldunused1.jpg'), 'x'.repeat(100)); fs.utimesSync(path.join(files, 'oldunused1.jpg'), old, old);
+  fs.writeFileSync(path.join(files, 'oldused1.jpg'), 'y'); fs.utimesSync(path.join(files, 'oldused1.jpg'), old, old);
+  fs.writeFileSync(path.join(files, 'newunused1.jpg'), 'z');
+  await fetch(base + '/api/store/projects/pkeep', { method: 'PUT', headers: H, body: JSON.stringify({ name: '引用', state: { skus: [{ fileUrl: '/files/oldused1.jpg' }] } }) });
+  let j = await (await fetch(base + '/api/settings/storage', { headers: H })).json();
+  assert.equal(j.unused.count, 1); assert.equal(j.unused.bytes, 100);
+  j = await (await post('/api/settings/storage/cleanup', {})).json();
+  assert.equal(j.moved, 1);
+  assert.ok(!fs.existsSync(path.join(files, 'oldunused1.jpg')) && fs.existsSync(path.join(j.trashDir, 'oldunused1.jpg')), '移到回收站，不是删除');
+  assert.ok(fs.existsSync(path.join(files, 'oldused1.jpg')), '被项目引用的保留');
+  assert.ok(fs.existsSync(path.join(files, 'newunused1.jpg')), '一天内的保留');
+  assert.equal(j.unused.count, 0);
 });
 
 test('内置样例：清单可以访问，samples 下只提供图片、视频和清单', async () => {

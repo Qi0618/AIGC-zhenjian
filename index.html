@@ -6,7 +6,7 @@
 <title>帧间 Zhenjian</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500&display=swap">
-<link rel="stylesheet" href="styles.css?v=1.1.1">
+<link rel="stylesheet" href="styles.css?v=1.2.0">
 </head>
 <body>
 <div class="app">
@@ -24,7 +24,7 @@
     </nav>
     <div class="side-foot">
       <span class="cloud"><span class="dot" id="cloudDot"></span><span id="cloudTxt">正在连接存储…</span></span>
-      <span class="ver">v1.1</span>
+      <span class="ver">v1.2</span>
     </div>
   </aside>
   <div class="maincol">
@@ -248,6 +248,12 @@
         </section>
       </div>
       <div class="set-foot" id="setFoot"><span class="hint">留空的项保持不变。保存后立即生效，不需要重启。</span><button type="button" class="btn primary" id="setSave">保存设置</button></div>
+      <section class="panel kcard set-storage" id="setStorage" hidden>
+        <div class="kcard-h"><h3>存储空间</h3><span class="kstate" id="stTotal"></span></div>
+        <p class="hint" id="stInfo">正在统计…</p>
+        <div class="kacts"><button type="button" class="btn sm" id="stClean" disabled>清理未使用的文件</button><span class="kmsg hint" id="stMsg"></span></div>
+        <p class="hint">项目、图片、视频和密钥都在 <span class="mono" id="stDir"></span> 里。备份或换电脑时，复制整个 data 文件夹即可。清理只会移走一天前生成、且没有被任何项目用到的文件，放进 data/trash，确认不需要后可以手动删除。</p>
+      </section>
     </section>
   </main>
   </div>
@@ -273,6 +279,6 @@
 </div>
 <div class="toast" id="toast" hidden></div>
 <div class="gate" id="gate" hidden><form class="panel" id="gateForm"><h3 style="margin:0">输入访问口令</h3><span class="hint">这台服务器设置了访问口令，请向管理员获取。</span><input id="gateIn" type="password" autocomplete="current-password" placeholder="访问口令" aria-label="访问口令"><button class="btn primary" type="submit">进入</button></form></div>
-<script src="app.js?v=1.1.1"></script>
+<script src="app.js?v=1.2.0"></script>
 </body>
 </html>

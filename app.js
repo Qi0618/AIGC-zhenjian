@@ -124,8 +124,8 @@ const API={
     try{
       const image=!s.kfUrl||(s.patches||[]).some(x=>x.url)?await frameData(s):s.kfUrl;
       const audio=wantsAudio()&&model!=='kling',prompt=videoPrompt(s,audio);
-      const {id}=await api('/api/video',{provider:model,image,prompt,duration:s.dur,ratio:dr().ratio,audio});
-      s.vAudio=audio;
+      const {id,textOnly}=await api('/api/video',{provider:model,image,prompt,duration:s.dur,ratio:dr().ratio,audio,fallback:videoFallback(s)});
+      s.vAudio=audio;s.vTextOnly=!!textOnly;
       s.vTask=id;s.vAt=Date.now();onTask&&onTask();
       return await API.pollVideo(id,model,onProgress,s.vAt);
     }catch(e){return{error:e.message}}
@@ -152,6 +152,11 @@ function speakerLine(s){
   if(m&&dr().chars.some(c=>c.name===m[1]))return{who:m[1],text:m[2]};
   const first=(s.cast||[]).map(charById).filter(Boolean)[0];
   return{who:first?first.name:null,text:m&&m[1].length<=4?m[2]:line};
+}
+// 首帧被判「像真人」时，视频改为按文字生成：补上出镜角色的外形和画风，让画面尽量接近设定
+function videoFallback(s){
+  const cast=(s.cast||[]).map(charById).filter(Boolean).map(c=>`${c.name}（${[c.role,c.look].filter(Boolean).join('，')}）`).join('、');
+  return `${cast?'出镜人物：'+cast+'。':''}景别：${s.scale}。光线：${MOOD_NAME[s.mood]||''}。画风：${LOOK_PROMPT[dr().look]||''}。`;
 }
 function videoPrompt(s,audio){
   const cam=s.cam&&s.cam!=='固定'?CAM_TXT[s.cam]+'。':'镜头固定。',sp=speakerLine(s);
@@ -571,12 +576,44 @@ $('#genBtn').onclick=()=>{
 };
 $('#selAll').onclick=()=>{const R=sh().results,all=R.every(r=>r.sel);R.forEach(r=>r.sel=!all);renderGroups()};
 $('#delBtn').onclick=()=>{const st=sh(),n=st.results.filter(r=>r.sel).length;st.results=st.results.filter(r=>{if(r.sel)CANV.delete(r.id);return!r.sel});touch(SHOP);renderGroups();renderSkuList();toast(`已删除 ${n} 张`)};
-$('#exportBtn').onclick=()=>{
-  if(!LIVE.on){toast('演示模式不能导出。部署后端后可下载原尺寸图片');return}
-  const sel=sh().results.filter(r=>r.sel);
-  sel.forEach((r,i)=>setTimeout(()=>{const z=size(r.size),cv=document.createElement('canvas');renderImage(cv,r,Math.max(z.w,z.h));
-    cv.toBlob(bl=>{const u=URL.createObjectURL(bl);saveUrl(u,`${(skuById(r.skuId)?.name||'商品').replace(/[\\/:*?"<>|]/g,'')}_${TYPES[r.type]}_${z.w}x${z.h}.png`);setTimeout(()=>URL.revokeObjectURL(u),4000)},'image/png')},i*350));
-  toast(`开始下载 ${sel.length} 张原尺寸图片`)};
+/* ---- 在浏览器里打 zip：不压缩（PNG 本身已压缩），文件名标 UTF-8，Windows 解压中文不乱码 ---- */
+const CRC_T=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xedb88320^(c>>>1):c>>>1;t[n]=c>>>0}return t})();
+function crc32(u8){let c=0xffffffff;for(let i=0;i<u8.length;i++)c=CRC_T[(c^u8[i])&0xff]^(c>>>8);return(c^0xffffffff)>>>0}
+function makeZip(files){
+  const enc=new TextEncoder(),parts=[],central=[];let off=0;const d=new Date();
+  const time=(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1),date=((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate();
+  for(const f of files){
+    const name=enc.encode(f.name),data=f.data,crc=crc32(data),h=new DataView(new ArrayBuffer(30)),c=new DataView(new ArrayBuffer(46));
+    [[0,0x04034b50,4],[4,20,2],[6,0x0800,2],[8,0,2],[10,time,2],[12,date,2],[14,crc,4],[18,data.length,4],[22,data.length,4],[26,name.length,2],[28,0,2]].forEach(([o,v,n])=>n===4?h.setUint32(o,v,true):h.setUint16(o,v,true));
+    [[0,0x02014b50,4],[4,20,2],[6,20,2],[8,0x0800,2],[10,0,2],[12,time,2],[14,date,2],[16,crc,4],[20,data.length,4],[24,data.length,4],[28,name.length,2],[42,off,4]].forEach(([o,v,n])=>n===4?c.setUint32(o,v,true):c.setUint16(o,v,true));
+    parts.push(h,name,data);central.push(c,name);off+=30+name.length+data.length}
+  const cdSize=central.reduce((a,x)=>a+x.byteLength,0),e=new DataView(new ArrayBuffer(22));
+  [[0,0x06054b50,4],[8,files.length,2],[10,files.length,2],[12,cdSize,4],[16,off,4]].forEach(([o,v,n])=>n===4?e.setUint32(o,v,true):e.setUint16(o,v,true));
+  return new Blob([...parts,...central,e],{type:'application/zip'});
+}
+const safeName=t=>String(t||'').replace(/[\\/:*?"<>|]/g,'').trim()||'未命名';
+// 按平台尺寸导出原图：先等图片加载好，避免导出「加载中」的占位图
+async function exportImage(r){
+  if(r.url)await waitImg(r.url).catch(()=>{});
+  const z=size(r.size),cv=document.createElement('canvas');renderImage(cv,r,Math.max(z.w,z.h));
+  const blob=await new Promise(ok=>cv.toBlob(ok,'image/png'));
+  const sku=skuById(r.skuId);
+  return{blob,folder:safeName(sku?.name||'商品'),file:`${TYPES[r.type]}_${(STYLES[r.style]||STYLES.minimal).name}_${z.w}x${z.h}.png`};
+}
+$('#exportBtn').onclick=async()=>{
+  const sel=sh().results.filter(r=>r.sel);if(!sel.length)return;
+  const b=$('#exportBtn');b.disabled=true;b.textContent=`导出中 0/${sel.length}`;
+  try{
+    const out=[];for(const r of sel){out.push(await exportImage(r));b.textContent=`导出中 ${out.length}/${sel.length}`}
+    if(out.length===1){const u=URL.createObjectURL(out[0].blob);saveUrl(u,`${out[0].folder}_${out[0].file}`);setTimeout(()=>URL.revokeObjectURL(u),4000);toast('已导出 1 张原尺寸图片');return}
+    const seen=new Set(),files=[];
+    for(const x of out){let n=`${x.folder}/${x.file}`,k=2;while(seen.has(n))n=`${x.folder}/${x.file.replace(/\.png$/,'')}-${k++}.png`;seen.add(n);files.push({name:n,data:new Uint8Array(await x.blob.arrayBuffer())})}
+    const zip=makeZip(files),u=URL.createObjectURL(zip);
+    saveUrl(u,`${safeName(SHOP.name)}-${files.length}张.zip`);setTimeout(()=>URL.revokeObjectURL(u),10000);
+    toast(`已打包 ${files.length} 张原尺寸图片（${(zip.size/1048576).toFixed(1)} MB），按商品分文件夹`);
+  }catch(e){toast('导出失败：'+e.message)}
+  finally{b.textContent='导出';updateSel()}
+};
 function togglePop(id){$$('.pop').forEach(p=>{if(p.id!==id)p.hidden=true});$('#'+id).hidden=!$('#'+id).hidden}
 function resizeJobs(){const sizes=$$('#sizeList input:checked').map(i=>i.value),jobs=[];sh().results.filter(r=>r.sel).forEach(r=>sizes.forEach(s=>{if(s!==r.size)jobs.push({skuId:r.skuId,type:r.type,style:r.style,seed:r.seed,size:s,...(r.url?{from:r.url,task:'resize'}:{})})}));return{sizes,jobs}}
 function updResizeEst(){const {jobs}=resizeJobs(),cost=jobs.reduce((a,j)=>a+priceImage(j.size),0);$('#resizeEst').outerHTML=`<span class="est" id="resizeEst">${jobs.length} 张 · ${num(cost)} 积分</span>`;$('#resizeApply').disabled=!jobs.length||cost>APP.credits}
@@ -990,7 +1027,7 @@ function renderStudio(){
   $('#genVideo').innerHTML=busy?'生成中…':`生成视频${todo.length?` <span class="cost">· ${num(cost)} 积分</span>`:''}`;
   $('#queue').innerHTML=S.map((s,i)=>{
     const locked=s.kf!=='ok';
-    const stt=locked?'<span class="st-lock">关键帧未确认</span>':s.video==='done'?'<span class="st-done">已完成</span>':s.video==='run'?`<span class="st-run">${(s.p||0)>=97?'下载到本机…':'生成中 '+Math.floor(s.p||0)+'%'}</span><div class="bar"><i style="width:${s.p||0}%"></i></div>`:s.video==='wait'?'<span class="st-wait">排队中</span>':`<span class="st-wait">待生成 · ${shotVCost(s)} 积分</span>`;
+    const stt=locked?'<span class="st-lock">关键帧未确认</span>':s.video==='done'?`<span class="st-done">已完成${s.vTextOnly?' · 按文字生成':''}</span>`:s.video==='run'?`<span class="st-run">${(s.p||0)>=97?'下载到本机…':'生成中 '+Math.floor(s.p||0)+'%'}</span><div class="bar"><i style="width:${s.p||0}%"></i></div>`:s.video==='wait'?'<span class="st-wait">排队中</span>':`<span class="st-wait">待生成 · ${shotVCost(s)} 积分</span>`;
     return `<div class="q ${locked?'locked':''}" data-i="${i}"><span class="mono">${pad2(i+1)}</span><div class="q-thumb"><canvas></canvas></div><div class="q-desc">${esc(s.desc)}<small>${s.scale} · ${s.cam} · ${s.dur}s</small></div><div class="q-state">${stt}</div></div>`}).join('');
   $$('#queue .q').forEach(q=>paintShot($('canvas',q),S[q.dataset.i],+q.dataset.i+1,110));
   renderTimeline();sizePlayer();drawPlayer();renderSteps();
@@ -1039,7 +1076,8 @@ $('#genVideo').onclick=()=>{
       active--;rer();
       if(!q.length&&!active){touch(proj);const ok=todo.length-failed;
         if(ok)logHistory(proj,`生成视频 ${ok} 镜`,proj.state.title,cost-back);
-        if(DRAMA===proj)toast(failed?`${failed} 个镜头生成失败，已退回 ${num(back)} 积分：${lastErr}`:`全部镜头已生成，消耗 ${num(cost)} 积分`)}
+        const textOnly=todo.filter(s=>s.vTextOnly&&s.video==='done').length,note=textOnly?`；其中 ${textOnly} 个镜头的关键帧太像真人照片，已改为按文字生成，画面会和关键帧有差异`:'';
+        if(DRAMA===proj)toast((failed?`${failed} 个镜头生成失败，已退回 ${num(back)} 积分：${lastErr}`:`全部镜头已生成，消耗 ${num(cost)} 积分`)+note)}
       else next()})}};
   next();rer();
 };
@@ -1136,12 +1174,12 @@ const CARD_KEYS={ark:['ark'],deepseek:['deepseek'],kling:['klingAk','klingSk']};
 let SET=null;
 async function renderSettings(){
   const note=$('#setNote'),grid=$('#setGrid'),foot=$('#setFoot');
-  const block=msg=>{note.hidden=false;note.innerHTML=msg;grid.hidden=foot.hidden=true};
+  const block=msg=>{note.hidden=false;note.innerHTML=msg;grid.hidden=foot.hidden=true;$('#setStorage').hidden=true};
   if(!LIVE.on)return block('现在是<b>演示模式</b>，没有连接到帧间服务，这里的设置不可用。下载帧间并双击启动后，再来这里填写密钥。');
   if(!LIVE.settings)return block('密钥只能在运行帧间的那台电脑上修改。');
   note.hidden=true;grid.hidden=foot.hidden=false;
   try{SET=await api('/api/settings')}catch(e){return block('读取设置失败：'+esc(e.message))}
-  fillSettings();
+  fillSettings();renderStorage();
 }
 function fillSettings(){
   if(!SET)return;const K=SET.keys;
@@ -1158,6 +1196,21 @@ async function testCard(which){
   try{const r=await api('/api/settings/test',body);keyMsg(which,r.ok?'✓ '+r.message:'✗ '+r.message,r.ok?'ok':'bad');return r.ok}
   catch(e){keyMsg(which,'✗ '+e.message,'bad');return false}
 }
+const mb=b=>b>=1048576*1024?(b/1073741824).toFixed(2)+' GB':(b/1048576).toFixed(1)+' MB';
+async function renderStorage(info){
+  const box=$('#setStorage');box.hidden=false;
+  try{info=info||await api('/api/settings/storage')}catch(e){$('#stInfo').textContent='统计失败：'+e.message;return}
+  $('#stDir').textContent=info.dataDir;
+  $('#stTotal').textContent=`${mb(info.files.bytes)} · ${info.files.count} 个文件`;
+  $('#stInfo').textContent=info.unused.count?`其中 ${info.unused.count} 个文件（${mb(info.unused.bytes)}）没有被任何项目用到，可以清理。`:'没有可以清理的文件。'+(info.trash.count?`回收站里有 ${info.trash.count} 个文件（${mb(info.trash.bytes)}）。`:'');
+  const b=$('#stClean');b.disabled=!info.unused.count;delete b.dataset.c;b.textContent=info.unused.count?`清理未使用的文件（${mb(info.unused.bytes)}）`:'清理未使用的文件';
+}
+$('#stClean').onclick=async()=>{
+  const b=$('#stClean');if(!b.dataset.c){b.dataset.c=1;b.textContent='再点一次确认清理';return}
+  b.disabled=true;b.textContent='清理中…';
+  try{const r=await api('/api/settings/storage/cleanup',{});$('#stMsg').textContent=`已移走 ${r.moved} 个文件（${mb(r.bytes)}）到 data/trash`;$('#stMsg').className='kmsg hint ok';renderStorage(r)}
+  catch(e){$('#stMsg').textContent='清理失败：'+e.message;$('#stMsg').className='kmsg hint bad';renderStorage()}
+};
 async function afterSettingsChange(){await detectLive();applyMode();renderWallet();refreshEstimates()}
 $('#setGrid').addEventListener('click',async e=>{
   const t=e.target.closest('[data-test]');if(t){t.disabled=true;await testCard(t.dataset.test);t.disabled=false;return}
