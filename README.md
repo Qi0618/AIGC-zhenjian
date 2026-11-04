@@ -128,7 +128,7 @@ npm test
 
 ```
 .
-├── index.html        页面结构
+├── index.html        页面结构（改了 styles.css / app.js 后，把这里引用地址上的 ?v= 版本号也改一下，避免浏览器用旧缓存）
 ├── styles.css        样式（明暗两套主题）
 ├── app.js            前端逻辑：模型调用、存储、电商模块、短剧模块、项目与历史
 ├── server/index.mjs  后端：托管页面 + 代理模型接口 + 保存生成结果 + 合成成片
