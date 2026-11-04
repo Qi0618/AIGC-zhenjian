@@ -101,6 +101,8 @@ export function friendlyError(label, status, msg) {
   if (status === 401 || /invalid api key|api key.*invalid|authenticat|unauthorized/i.test(m)) return `${label}的密钥无效或已过期，请到「设置」里重新填写`;
   if (/overdue|insufficient|balance|arrear|欠费|余额/i.test(m)) return `${label}的账户余额不足或已欠费，请先到对应平台充值`;
   if (status === 429 || /rate.?limit|too many requests|RequestBurstTooFast|quota/i.test(m)) return `${label}请求太频繁或超出额度，请稍等一会儿再试`;
+  // 视频模型不允许用「像真人照片」的图做首帧（防伪造真人），写实画风的关键帧常被误判
+  if (/real person|real human|真人/i.test(m)) return `${label}认为画面里的人物太像真人照片，不允许用来生成视频。可以把短剧画风换成「动漫」后重画关键帧再试`;
   if (/sensitive|risk|审核|违规/i.test(m)) return `${label}判定内容可能不合规，请修改描述或图片后再试`;
   return `${label}返回错误：${m}`;
 }

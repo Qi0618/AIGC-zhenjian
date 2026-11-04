@@ -235,6 +235,7 @@ test('模型平台的报错翻成中文，不暴露模型 ID 和账号', () => {
   assert.match(f('AccountOverdueError: account balance is insufficient'), /余额不足/);
   assert.match(f('Too Many Requests', 429), /太频繁/);
   assert.match(f('The request failed because the input image may contain sensitive information'), /不合规/);
+  assert.match(f("The request failed because the input image 'content[1]' may contain real person."), /太像真人.*动漫/);
   assert.equal(f('something else'), '视频服务返回错误：something else');
 });
 
