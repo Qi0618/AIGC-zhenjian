@@ -175,6 +175,9 @@ function applyMode(){
   if(LIVE.auth&&!LIVE.token)showGate();
 }
 const DEFAULT_CREDITS=3000;
+/* 内置样例（samples/manifest.json）：真实生成的商品图、关键帧、视频和成片。没有时退回画布模拟 */
+let SAMPLE_DATA=null;
+async function loadSamples(){try{const r=await fetch('samples/manifest.json',{cache:'no-cache'});if(r.ok){const j=await r.json();if(j&&j.version===1)SAMPLE_DATA=j}}catch(e){}}
 
 /* ================= 存储：Claude 云端 → 浏览器本地 → 仅本次会话 ================= */
 const APP={base:null,projects:[],history:[],view:'shop',credits:DEFAULT_CREDITS};
@@ -364,6 +367,7 @@ function productImg(sku,onReady){
 }
 
 function newShopState(sample){
+  if(sample&&SAMPLE_DATA&&SAMPLE_DATA.shop)return unpackShop(SAMPLE_DATA.shop.state);
   const st={skus:[],active:null,plan:{types:['white','main','scene'],style:'cream',sizes:['sq','xhs'],per:1},results:[],customSizes:{},filter:'all'};
   if(sample){
     st.skus=[
@@ -642,7 +646,8 @@ const FILLERS=[
 ];
 const VARIANTS=['，镜头从人物背后切入','，以玻璃倒影呈现','，做慢动作处理','，前景加入虚化遮挡','，光影从侧面打入'];
 
-function newDramaState(genre='都市逆袭'){const st={genre,dirty:false,len:30,nShots:8,ratio:'9:16',look:'real',voice:'AI 配音 + 字幕',step:1,maxStep:1,chars:[],shots:[],time:0};fillGenreInto(st,genre);return st}
+function newDramaState(genre='都市逆袭',sample=false){
+  if(sample&&SAMPLE_DATA&&SAMPLE_DATA.drama){const st=unpackDrama(SAMPLE_DATA.drama.state);st.sampleFilm=SAMPLE_DATA.drama.film||null;return st}const st={genre,dirty:false,len:30,nShots:8,ratio:'9:16',look:'real',voice:'AI 配音 + 字幕',step:1,maxStep:1,chars:[],shots:[],time:0};fillGenreInto(st,genre);return st}
 function fillGenreInto(st,g){const x=GENRES[g];st.title=x.title;st.syn=x.syn;st.chars=x.chars.map((c,i)=>({id:rid('c'),name:c[0],role:c[1],look:c[2],color:CHAR_COLORS[i%CHAR_COLORS.length]}));st.dirty=false}
 // 生成中的状态（kf=run、video=wait/run）原样保存，下次打开项目时由 recoverInterrupted 处理
 function packDrama(st){const{time,...rest}=st;return{...rest,chars:st.chars.map(({src,...c})=>c),shots:st.shots.map(s=>({...s,p:0,kp:0}))}}
@@ -1054,7 +1059,9 @@ function resumeVideos(proj,shots){
   rer();toast(`「${proj.name}」有 ${shots.length} 个视频任务还在生成，正在继续查询`);
 }
 $('#exportVideo').onclick=async()=>{
-  const L=playList();if(!LIVE.on||!L.every(s=>s.videoUrl)){toast('演示模式不能导出。部署后端后可导出 MP4 成片');return}
+  const L=playList();
+  if(!LIVE.on&&dr().sampleFilm){window.open(dr().sampleFilm,'_blank');toast('已打开样例成片');return}
+  if(!LIVE.on||!L.every(s=>s.videoUrl)){toast('演示模式不能导出。部署后端后可导出 MP4 成片');return}
   const b=$('#exportVideo');b.disabled=true;b.textContent='合成中…';
   const subtitles=dr().voice!=='无';
   try{const r=await api('/api/concat',{urls:L.map(s=>s.videoUrl),durs:L.map(s=>s.dur),lines:L.map(s=>(speakerLine(s)||{}).text||''),ratio:dr().ratio,subtitles});
@@ -1067,7 +1074,7 @@ $('#pnameDrama').addEventListener('input',e=>{DRAMA.name=e.target.value||'未命
 /* ================= 项目 / 历史 ================= */
 function newProject(kind,o={}){
   const p={id:rid('p'),kind,name:o.name||(kind==='shop'?'新电商项目':'新短剧项目'),updatedAt:Date.now(),saved:false,sample:!!o.sample,unpacked:true,spent:0,
-    state:kind==='shop'?newShopState(!!o.sample):newDramaState()};
+    state:kind==='shop'?newShopState(!!o.sample):newDramaState(undefined,!!o.sample)};
   APP.projects.unshift(p);return p;
 }
 function prep(p){if(!p.unpacked){p.state=p.kind==='shop'?unpackShop(p.state):unpackDrama(p.state);p.unpacked=true;recoverInterrupted(p)}return p}
@@ -1179,10 +1186,16 @@ function homeShop(sku,type,style,size,seed,max){const cv=document.createElement(
 function homeFrame(shot,look,wide,w,redo){const cv=document.createElement('canvas');const W=wide?w:Math.round(w*9/16),H=wide?Math.round(w*9/16):w;cv.width=W;cv.height=H;drawFrame(cv.getContext('2d'),W,H,{...shot,patches:[]},.5,{look,onImg:redo});return cv}
 function homeShots(){const st=dr();return st.shots&&st.shots.length?st.shots:mockStoryboard(storyOf(st))}
 let homeT=0;function homeSoon(){clearTimeout(homeT);homeT=setTimeout(()=>{if(APP.view==='home')renderHome()},120)}
+// 真实生成的图：先触发加载，加载好后首页重画
+function realShop(r,max){loadImg(r.url,homeSoon);const cv=document.createElement('canvas');renderImage(cv,r,max);return cv}
+function realResults(){const R=(sh().results||[]).filter(r=>r.url),by=t=>R.filter(r=>r.type===t);
+  // 主图、场景图、白底图交替排列，首页看起来更丰富
+  const out=[],lists=[by('main'),by('scene'),by('white')];for(let i=0;out.length<R.length;i++)lists.forEach(l=>{if(l[i])out.push(l[i])});return out}
 function renderHome(){
-  const skus=(sh().skus||[]).filter(Boolean),shots=homeShots();
+  const skus=(sh().skus||[]).filter(Boolean),shots=homeShots(),real=realResults();
   const es=$('#entryShop');es.innerHTML='';
-  if(skus.length){[['main','cream','sq'],['scene','fresh','detail'],['main','tech','sq']].forEach(([t,st,sz],i)=>es.appendChild(homeShop(skus[i%skus.length],t,st,sz,30+i,i===1?132:104)))}
+  if(real.length>=3)real.slice(0,3).forEach((r,i)=>es.appendChild(realShop(r,i===1?132:104)));
+  else if(skus.length){[['main','cream','sq'],['scene','fresh','detail'],['main','tech','sq']].forEach(([t,st,sz],i)=>es.appendChild(homeShop(skus[i%skus.length],t,st,sz,30+i,i===1?132:104)))}
   const ed=$('#entryDrama');ed.innerHTML='';
   shots.slice(0,3).forEach((s,i)=>ed.appendChild(homeFrame(s,['film','real','anime'][i],false,i===1?176:148,homeSoon)));
   // 最近项目
@@ -1193,7 +1206,7 @@ function renderHome(){
     b.innerHTML=`<div class="rcover"><span class="kind">${pj.kind==='shop'?'电商图片':'短剧'}</span></div><div class="rbody"><h4>${esc(pj.name)}</h4><span>${projSummary(pj)}</span><span>${pj.saved?'更新于 '+dayLabel(pj.updatedAt)+' '+hm(pj.updatedAt):pj.sample?'示例项目':'未保存'}</span></div>`;
     const cov=b.querySelector('.rcover');let cv=null;
     try{
-      if(pj===SHOP&&sh().results.length){const r=sh().results[0];cv=homeShop(skuById(r.skuId)||skus[0],r.type,r.style,'sq',r.seed,320)}
+      if(pj===SHOP&&sh().results.length){const r=real[0]||sh().results[0];cv=r.url?realShop(r,320):homeShop(skuById(r.skuId)||skus[0],r.type,r.style,'sq',r.seed,320)}
       else if(pj===DRAMA){const s=homeShots()[0];if(s)cv=homeFrame(s,dr().look,true,320,homeSoon)}
     }catch(e){cv=null}
     if(cv)cov.prepend(cv);else cov.insertAdjacentHTML('beforeend',`<span class="ph">${pj.kind==='shop'?'图':'影'}</span>`);
@@ -1203,7 +1216,8 @@ function renderHome(){
   const G=$('#gallery');G.innerHTML='';
   const A=[],B=[];
   const plan=[['main','cream','xhs'],['scene','fresh','sq'],['main','guochao','detail'],['white','minimal','sq'],['scene','tech','dy'],['main','gray','sq'],['scene','cream','xhs'],['main','fresh','detail']];
-  if(skus.length)plan.forEach(([t,st,sz],i)=>{const k=skus[i%skus.length];A.push({kind:'shop',cv:homeShop(k,t,st,sz,60+i,340),cap:k.name||'商品',sub:`${STYLES[st].name} · ${SIZES[sz].label}`})});
+  if(real.length)real.slice(0,8).forEach(r=>{const k=skuById(r.skuId)||{};A.push({kind:'shop',cv:realShop(r,340),cap:k.name||'商品',sub:`${TYPES[r.type]} · ${(STYLES[r.style]||STYLES.minimal).name}`})});
+  else if(skus.length)plan.forEach(([t,st,sz],i)=>{const k=skus[i%skus.length];A.push({kind:'shop',cv:homeShop(k,t,st,sz,60+i,340),cap:k.name||'商品',sub:`${STYLES[st].name} · ${SIZES[sz].label}`})});
   const looks=['film','real','anime'];
   shots.slice(0,4).forEach((s,i)=>B.push({kind:'drama',cv:homeFrame(s,looks[i%3],true,340,homeSoon),cap:`${dr().title||'短剧'} · 第 ${i+1} 镜`,sub:LOOK_NAME[looks[i%3]]}));
   const order=[];while(A.length||B.length){if(A.length)order.push(A.shift());if(A.length)order.push(A.shift());if(B.length)order.push(B.shift())}
@@ -1223,12 +1237,13 @@ function setView(v){
 $$('.nav-btn').forEach(b=>b.onclick=()=>setView(b.dataset.view));
 function ensureCurrent(){
   const pick=k=>{let id=null;try{id=localStorage.getItem('vs-last-'+k)}catch(e){}return APP.projects.find(p=>p.id===id&&p.kind===k)||APP.projects.filter(p=>p.kind===k).sort((a,b)=>b.updatedAt-a.updatedAt)[0]};
-  if(!SHOP){SHOP=prep(pick('shop')||newProject('shop',{sample:true,name:'示例 · 美妆三件套'}));CANV.clear();renderShopAll()}
-  if(!DRAMA){DRAMA=prep(pick('drama')||newProject('drama',{sample:true,name:'示例 · 重回发布会'}));renderDramaAll()}
+  if(!SHOP){SHOP=prep(pick('shop')||newProject('shop',{sample:true,name:SAMPLE_DATA?.shop?.name||'示例 · 美妆三件套'}));CANV.clear();renderShopAll()}
+  if(!DRAMA){DRAMA=prep(pick('drama')||newProject('drama',{sample:true,name:SAMPLE_DATA?.drama?.name||'示例 · 重回发布会'}));renderDramaAll()}
 }
 $('#gateForm').onsubmit=e=>{e.preventDefault();const v=$('#gateIn').value.trim();if(!v)return;LIVE.token=v;try{localStorage.setItem('hy-token',v)}catch(err){}$('#gate').hidden=true;toast('已保存访问口令')};
 async function init(){
   await detectLive();
+  await loadSamples();
   await Store.init();applyMode();
   const [dot,txt]=STORE_TXT[Store.mode];$('#cloudDot').className='dot '+dot;$('#cloudTxt').textContent=txt;
   ensureCurrent();renderWallet();$('#bootMsg').remove();

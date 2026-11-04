@@ -166,6 +166,12 @@ async function toDataUri(src) {
     const ext = extOf(buf); return `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,` + buf.toString('base64');
   }
   if (/^https?:\/\//.test(src)) return src;
+  // 内置样例（samples/ 下的图）：读文件转成 data URI，样例项目也能作为参考图重新生成
+  if (/^\/?samples\//.test(src)) {
+    const buf = await fsp.readFile(path.join(ROOT, 'samples', path.basename(src))).catch(() => null);
+    if (!buf) throw new HttpError(400, '样例图片不存在：' + src);
+    const ext = extOf(buf); return `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,` + buf.toString('base64');
+  }
   throw new HttpError(400, '无法识别的图片地址');
 }
 
@@ -202,7 +208,7 @@ function shotRules(E) {
   const moodList = (E.moods || []).map(k => (E.moodNames && E.moodNames[k] ? `${k}（${E.moodNames[k]}）` : k)).join('/');
   return `取值限制：scale 只能是 ${(E.scales || []).join('/')}；mood 只能是 ${moodList}（填括号前的英文）；cam 只能是 ${(E.cams || []).join('/')}；dur 为 2~8 的整数；cast 为上面角色序号组成的数组，最多 3 个。`;
 }
-const SHOT_FMT = '{"scale":"景别","mood":"光线","cam":"运镜","desc":"画面描述，一两句，写清人物动作和环境","line":"台词或旁白，没有就空字符串","dur":秒数,"cast":[出镜角色序号]}';
+const SHOT_FMT = '{"scale":"景别","mood":"光线","cam":"运镜","desc":"画面描述，一两句，写清人物动作和环境","line":"台词或旁白，写成「说话人：内容」，如「林夏：你好」「旁白：三年后」，没有就空字符串","dur":秒数,"cast":[出镜角色序号]}';
 // 模型输出不一定守规矩：取值不在枚举里就用默认值，长度和时长都截断到合理范围
 export function normalizeShot(x, E = {}, nChars = 0) {
   x = x || {};
@@ -211,7 +217,7 @@ export function normalizeShot(x, E = {}, nChars = 0) {
     scale: pick(x.scale, E.scales, (E.scales || [])[2] || '中景'),
     mood: pick(x.mood, E.moods, (E.moods || [])[0] || 'night'),
     cam: pick(x.cam, E.cams, (E.cams || [])[0] || '固定'),
-    desc: String(x.desc || '').slice(0, 200), line: String(x.line || '').slice(0, 60),
+    desc: String(x.desc || '').slice(0, 200), line: String(x.line || '').slice(0, 70),
     dur: Math.max(2, Math.min(8, Math.round(+x.dur || 3))),
     cast: [...new Set((Array.isArray(x.cast) ? x.cast : []).map(Number))].filter(i => Number.isInteger(i) && i >= 0 && i < nChars).slice(0, 3),
   };
@@ -235,7 +241,7 @@ ${storyBrief(s)}
 
 输出格式：{"shots":[${SHOT_FMT}]}
 ${shotRules(E)}
-要求：开头 3 秒内要有钩子，结尾留悬念；台词口语化，每句不超过 20 字。`;
+要求：开头 3 秒内要有钩子，结尾留悬念；台词口语化，每句不超过 20 字；说话人必须是上面的角色名或「旁白」，并且是本镜头出镜的角色。`;
   const { out, usage } = await chat(user);
   const shots = (out.shots || []).slice(0, 30).map(x => normalizeShot(x, E, (s.chars || []).length));
   if (!shots.length) throw new HttpError(502, '分镜服务没有返回镜头，请重试');
@@ -403,7 +409,8 @@ export function buildConcatFilter(clips, [W, H], font) {
 }
 async function concatVideos({ urls, durs, lines, ratio = '9:16', subtitles = true }) {
   if (!HAS_FFMPEG) throw new HttpError(501, '没有找到 ffmpeg，无法合成成片，改为逐个下载镜头');
-  const files = (urls || []).map(u => path.join(FILES, path.basename(String(u))));
+  // 镜头可以是生成的（/files/）或内置样例（samples/）
+  const files = (urls || []).map(u => /^\/?samples\//.test(String(u)) ? path.join(ROOT, 'samples', path.basename(String(u))) : path.join(FILES, path.basename(String(u))));
   if (!files.length || files.length > 60 || files.some(f => !fs.existsSync(f))) throw new HttpError(400, '有镜头视频已不存在');
   const size = ratio === '16:9' ? [1280, 720] : [720, 1280];
   const tmp = await fsp.mkdtemp(path.join(CFG.dataDir, 'tmp-'));
@@ -621,6 +628,8 @@ export const server = http.createServer(async (req, res) => {
       throw new HttpError(404, '接口不存在');
     }
     if (p.startsWith('/files/')) return serveStatic(req, res, path.join(FILES, path.basename(p)));
+    // 内置样例：只允许 samples 目录下这几种文件
+    if (p.startsWith('/samples/') && /\.(jpg|png|webp|mp4|json)$/.test(p)) return serveStatic(req, res, path.join(ROOT, 'samples', path.basename(p)));
     // 带扩展名或以点开头、但不在白名单里的（如 /favicon.ico、/.env）一律 404，其余路径回落到首页
     if (!STATIC.has(p) && (path.extname(p) || path.basename(p).startsWith('.'))) { res.writeHead(404, SAFE_HEADERS); res.end('Not found'); return; }
     return serveStatic(req, res, path.join(ROOT, STATIC.has(p) ? p : '/index.html'));

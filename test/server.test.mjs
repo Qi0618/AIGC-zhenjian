@@ -323,6 +323,19 @@ test('上传图片：存成文件返回地址，不接受非图片', async () =>
   assert.equal((await post('/api/upload', { dataUrl: 'not a data url' })).status, 400);
 });
 
+test('内置样例：清单可以访问，samples 下只提供图片、视频和清单', async () => {
+  const r = await fetch(base + '/samples/manifest.json');
+  if (r.status === 200) { const m = await r.json(); assert.equal(m.version, 1); assert.ok(m.shop.state.results.every(x => x.url.startsWith('samples/'))); }
+  assert.equal((await fetch(base + '/samples/index.mjs')).status, 404);
+  assert.equal((await fetch(base + '/samples/..%2Fserver%2Findex.mjs')).status, 404);
+});
+
+test('分镜要求台词带说话人', async () => {
+  await post('/api/storyboard', { story: STORY, enums: ENUMS });
+  const ask = calls.filter(c => c.url === '/chat/completions').pop().body.messages[1].content;
+  assert.match(ask, /说话人：内容/); assert.match(ask, /说话人必须是上面的角色名或「旁白」/);
+});
+
 test('静态文件：白名单之外带扩展名的路径 404，其余回落首页', async () => {
   assert.equal((await fetch(base + '/favicon.ico')).status, 404);
   assert.equal((await fetch(base + '/.env')).status, 404);

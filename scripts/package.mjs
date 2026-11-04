@@ -207,6 +207,12 @@ async function build(id) {
     await fsp.mkdir(path.dirname(dest), { recursive: true });
     await fsp.copyFile(path.join(ROOT, f), dest);
   }
+  // 内置样例：真实生成的图片、视频和成片
+  const samples = path.join(ROOT, 'samples');
+  if (fs.existsSync(path.join(samples, 'manifest.json'))) {
+    await fsp.mkdir(path.join(out, 'app', 'samples'), { recursive: true });
+    for (const f of await fsp.readdir(samples)) if (/\.(jpg|png|webp|mp4|json)$/.test(f)) await fsp.copyFile(path.join(samples, f), path.join(out, 'app', 'samples', f));
+  } else console.log('  （没有 samples/manifest.json，演示内容用画布模拟）');
   // 只取出 node 可执行文件和许可证
   const inner = t.archive.replace(/\.(tar\.gz|zip)$/, '');
   const tmp = path.join(DIST, 'build', '.extract-' + id);
