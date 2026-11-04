@@ -50,7 +50,11 @@ function startMock() {
       }
       if (req.method === 'POST' && req.url === '/contents/generations/tasks') return json({ id: 'up-1' });
       if (req.url === '/contents/generations/tasks/up-1') return json({ status: 'succeeded', content: { video_url: mockUrl + '/v.mp4' } });
-      if (req.url === '/v.mp4') { res.writeHead(200, { 'content-type': 'video/mp4' }); return res.end(MP4); }
+      if (req.url === '/v.mp4') { // 模拟下载要花一点时间
+        hits['/v.mp4'] = (hits['/v.mp4'] || 0) + 1;
+        res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': MP4.length }); res.write(MP4.subarray(0, 4));
+        return setTimeout(() => res.end(MP4.subarray(4)), 300);
+      }
       res.writeHead(404); res.end();
     }).listen(0, () => { mockUrl = `http://127.0.0.1:${mock.address().port}`; ok(); });
   });
@@ -174,8 +178,13 @@ test('视频：创建任务 → 查询完成 → 下载到本地；任务记录�
   const { id } = await (await post('/api/video', { provider: 'seedance', image: img, prompt: '走路', duration: 2 })).json();
   const create = calls.find(c => c.url === '/contents/generations/tasks');
   assert.equal(create.body.duration, 4, '短于 4 秒按 4 秒生成');
-  const q = await (await fetch(base + '/api/video/' + id, { headers: H })).json();
+  const poll = async () => (await fetch(base + '/api/video/' + id, { headers: H })).json();
+  // 生成完成后在后台下载：查询马上返回「下载中」，下载期间反复查询也只下载一次
+  assert.equal((await poll()).status, 'downloading');
+  assert.equal((await poll()).status, 'downloading');
+  let q; for (let i = 0; i < 40; i++) { q = await poll(); if (q.status !== 'downloading') break; await new Promise(r => setTimeout(r, 50)); }
   assert.equal(q.status, 'succeeded'); assert.match(q.url, /\.mp4$/);
+  assert.equal(hits['/v.mp4'], 1, '同一个视频只下载一次');
   assert.deepEqual(Buffer.from(await (await fetch(base + q.url)).arrayBuffer()), MP4);
   await new Promise(r => setTimeout(r, 50));
   assert.ok(JSON.parse(fs.readFileSync(path.join(dataDir, 'tasks.json'), 'utf8'))[id]);

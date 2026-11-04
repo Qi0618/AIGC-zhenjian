@@ -1,6 +1,6 @@
 {
   "name": "zhenjian",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "帧间 Zhenjian：电商套图 + AI 短剧创作工作台",
   "type": "module",

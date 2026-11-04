@@ -134,6 +134,7 @@ const API={
       for(;;){await sleep(5000);let r;try{r=await api('/api/video/'+id);fails=0}catch(e){if(++fails>=4)throw e;continue}
         if(r.status==='succeeded'){onProgress&&onProgress(1);return{url:r.url}}
         if(r.status==='failed')return{error:r.error||'生成失败'};
+        if(r.status==='downloading'){onProgress&&onProgress(.97,'download');continue} // 已生成，正在下载到本机
         onProgress&&onProgress(Math.min(.95,(Date.now()-t0)/1000/exp))}
     }catch(e){return{error:e.message}}
   },
@@ -930,7 +931,7 @@ function renderStudio(){
   $('#genVideo').innerHTML=busy?'生成中…':`生成视频${todo.length?` <span class="cost">· ${num(cost)} 积分</span>`:''}`;
   $('#queue').innerHTML=S.map((s,i)=>{
     const locked=s.kf!=='ok';
-    const stt=locked?'<span class="st-lock">关键帧未确认</span>':s.video==='done'?'<span class="st-done">已完成</span>':s.video==='run'?`<span class="st-run">生成中 ${Math.floor(s.p||0)}%</span><div class="bar"><i style="width:${s.p||0}%"></i></div>`:s.video==='wait'?'<span class="st-wait">排队中</span>':`<span class="st-wait">待生成 · ${shotVCost(s)} 积分</span>`;
+    const stt=locked?'<span class="st-lock">关键帧未确认</span>':s.video==='done'?'<span class="st-done">已完成</span>':s.video==='run'?`<span class="st-run">${(s.p||0)>=97?'下载到本机…':'生成中 '+Math.floor(s.p||0)+'%'}</span><div class="bar"><i style="width:${s.p||0}%"></i></div>`:s.video==='wait'?'<span class="st-wait">排队中</span>':`<span class="st-wait">待生成 · ${shotVCost(s)} 积分</span>`;
     return `<div class="q ${locked?'locked':''}" data-i="${i}"><span class="mono">${pad2(i+1)}</span><div class="q-thumb"><canvas></canvas></div><div class="q-desc">${esc(s.desc)}<small>${s.scale} · ${s.cam} · ${s.dur}s</small></div><div class="q-state">${stt}</div></div>`}).join('');
   $$('#queue .q').forEach(q=>paintShot($('canvas',q),S[q.dataset.i],+q.dataset.i+1,110));
   renderTimeline();sizePlayer();drawPlayer();renderSteps();
@@ -950,7 +951,7 @@ function drawPlayer(){
   const msg=t=>{c.fillStyle='#0C0D10';c.fillRect(0,0,cv.width,cv.height);c.fillStyle='#8A8F96';c.font='15px '+FONT;c.textAlign='center';c.fillText(t,cv.width/2,cv.height/2)};
   if(!L.length){msg('先在上一步确认关键帧');return}
   const {i,t}=shotAt(L,dr().time),s=L[i],no=dr().shots.indexOf(s)+1;
-  if(s.video!=='done'){msg(s.video==='run'?`镜头 ${no} 生成中…`:`镜头 ${no} 尚未生成`);return}
+  if(s.video!=='done'){msg(s.video==='run'?`镜头 ${no} ${(s.p||0)>=97?'已生成，正在下载到本机…':'生成中…'}`:`镜头 ${no} 尚未生成`);return}
   if(s.videoUrl){showVid(vid,s,t);return}
   drawFrame(c,cv.width,cv.height,s,t,{no,meta:true,sub:dr().voice!=='无'});
 }

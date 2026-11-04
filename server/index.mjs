@@ -301,10 +301,29 @@ async function createVideo({ provider = 'seedance', image, prompt = '', duration
   const id = newId(); TASKS.set(id, { provider, upstreamId, at: Date.now() }); saveTasks();
   return { id };
 }
+// 视频生成好以后在后台下载到本机：网速慢时一段视频要下好几分钟，查询进度不必一直挂着等；同一个任务只下载一次
+const DOWNLOADS = new Map();
 async function queryVideo(id) {
   const t = TASKS.get(id); if (!t) throw new HttpError(404, '任务不存在');
   if (t.url) return { status: 'succeeded', url: t.url };
   if (t.error) return { status: 'failed', error: t.error };
+  if (!t.remote) {
+    const r = await queryUpstreamVideo(t);
+    if (r.status === 'failed') { t.error = r.error || '生成失败'; saveTasks(); return { status: 'failed', error: t.error }; }
+    if (r.status !== 'succeeded') return { status: 'running', elapsed: Math.round((Date.now() - t.at) / 1000) };
+    if (!r.remote) throw new HttpError(502, '任务完成但没有视频地址');
+    t.remote = r.remote; t.doneAt = Date.now(); saveTasks(); // 记下地址，服务重启后也能接着下载
+  }
+  if (!DOWNLOADS.has(id)) {
+    if ((t.dlFails || 0) >= 3) { t.error = '视频已经生成，但下载到本机失败了：' + (t.dlError || ''); saveTasks(); return { status: 'failed', error: t.error }; }
+    DOWNLOADS.set(id, download(t.remote, 'mp4')
+      .then(url => { t.url = url; delete t.remote; saveTasks(); })
+      .catch(e => { t.dlFails = (t.dlFails || 0) + 1; t.dlError = e.message; saveTasks(); console.error('下载视频失败', id, e.message); })
+      .finally(() => DOWNLOADS.delete(id)));
+  }
+  return { status: 'downloading', elapsed: Math.round((Date.now() - t.at) / 1000) };
+}
+async function queryUpstreamVideo(t) {
   let status, remote, error;
   if (t.provider === 'kling') {
     const j = await upstream(`${CFG.klingBase}/v1/videos/image2video/${t.upstreamId}`, { headers: { authorization: 'Bearer ' + klingJwt() } }, '视频服务');
@@ -315,12 +334,7 @@ async function queryVideo(id) {
     const s = String(j.status || '').toLowerCase(); status = s === 'succeeded' ? 'succeeded' : ['failed', 'cancelled', 'expired'].includes(s) ? 'failed' : 'running';
     remote = j.content?.video_url; error = j.error?.message;
   }
-  if (status === 'succeeded') {
-    if (!remote) throw new HttpError(502, '任务完成但没有视频地址');
-    t.url = await download(remote, 'mp4'); saveTasks(); return { status, url: t.url };
-  }
-  if (status === 'failed') { t.error = error || '生成失败'; saveTasks(); return { status, error: t.error }; }
-  return { status: 'running', elapsed: Math.round((Date.now() - t.at) / 1000) };
+  return { status, remote, error };
 }
 
 /* ---------------- 合成成片：把各镜头 mp4 拼成一条 ---------------- */
