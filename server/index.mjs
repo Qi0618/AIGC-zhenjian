@@ -43,7 +43,12 @@ function loadEnv(f) {
   }
 }
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
-const need = (ok, what) => { if (!ok) throw new HttpError(503, `${what} 未配置，请在 .env 里填写后重启服务`); };
+// 页面上不显示具体用的哪家模型：缺配置时只告诉用户「暂未开通」，具体缺哪个密钥写到服务器日志里
+const need = (ok, what, label) => {
+  if (ok) return;
+  console.warn(`${what} 未配置，请在 .env 里填写后重启服务`);
+  throw new HttpError(503, `${label}暂未开通，请联系管理员`);
+};
 const newId = () => Date.now().toString(36) + crypto.randomBytes(5).toString('hex');
 
 async function readJson(req, limit = 40 * 1024 * 1024) {
@@ -140,7 +145,7 @@ export function seedreamSize(w, h) {
   return `${W}x${H}`;
 }
 async function genImage({ prompt, images = [], width = 1024, height = 1024 }) {
-  need(CFG.arkKey, '火山方舟 ARK_API_KEY');
+  need(CFG.arkKey, '火山方舟 ARK_API_KEY', '生图服务');
   if (!prompt) throw new HttpError(400, '缺少提示词');
   const refs = (await Promise.all(images.slice(0, 6).map(toDataUri))).filter(Boolean);
   const body = { model: CFG.imageModel, prompt, size: seedreamSize(width, height), response_format: 'url', watermark: false };
@@ -148,8 +153,8 @@ async function genImage({ prompt, images = [], width = 1024, height = 1024 }) {
   if (refs.length) body.image = refs.length === 1 ? refs[0] : refs;
   const j = await upstream(CFG.arkBase + '/images/generations', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.arkKey }, body: JSON.stringify(body),
-  }, 'Seedream');
-  const d = j.data?.[0]; if (!d) throw new HttpError(502, 'Seedream 没有返回图片');
+  }, '生图服务');
+  const d = j.data?.[0]; if (!d) throw new HttpError(502, '生图服务没有返回图片，请重试');
   const url = d.b64_json ? await saveFile(Buffer.from(d.b64_json, 'base64'), 'jpg') : await download(d.url);
   return { url, model: CFG.imageModel };
 }
@@ -180,14 +185,14 @@ export function normalizeShot(x, E = {}, nChars = 0) {
 }
 export function parseJsonReply(text) {
   const m = String(text || '').match(/\{[\s\S]*\}/);
-  try { return JSON.parse(m ? m[0] : text); } catch { throw new HttpError(502, '分镜模型返回的不是合法 JSON，请重试'); }
+  try { return JSON.parse(m ? m[0] : text); } catch { throw new HttpError(502, '分镜结果格式不对，请重试'); }
 }
 async function chat(user, temperature = 0.8) {
-  need(CFG.llmKey, '分镜模型密钥（ARK_API_KEY 或 DEEPSEEK_API_KEY）');
+  need(CFG.llmKey, '分镜模型密钥（ARK_API_KEY 或 DEEPSEEK_API_KEY）', '分镜服务');
   const j = await upstream(CFG.llmBase + '/chat/completions', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.llmKey },
     body: JSON.stringify({ model: CFG.llmModel, temperature, messages: [{ role: 'system', content: SB_SYS }, { role: 'user', content: user }] }),
-  }, 'DeepSeek');
+  }, '分镜服务');
   return { out: parseJsonReply(j.choices?.[0]?.message?.content), usage: j.usage };
 }
 async function genStoryboard({ story, enums }) {
@@ -200,7 +205,7 @@ ${shotRules(E)}
 要求：开头 3 秒内要有钩子，结尾留悬念；台词口语化，每句不超过 20 字。`;
   const { out, usage } = await chat(user);
   const shots = (out.shots || []).slice(0, 30).map(x => normalizeShot(x, E, (s.chars || []).length));
-  if (!shots.length) throw new HttpError(502, '分镜模型没有返回镜头，请重试');
+  if (!shots.length) throw new HttpError(502, '分镜服务没有返回镜头，请重试');
   return { shots, usage, model: CFG.llmModel };
 }
 // 重写单个镜头：带上前后镜头作为上下文，保证剧情连贯
@@ -218,7 +223,7 @@ ${ctx}
 输出格式：{"shot":${SHOT_FMT}}
 ${shotRules(E)}`;
   const { out, usage } = await chat(user, 0.9);
-  if (!out.shot || !out.shot.desc) throw new HttpError(502, '分镜模型没有返回镜头，请重试');
+  if (!out.shot || !out.shot.desc) throw new HttpError(502, '分镜服务没有返回镜头，请重试');
   return { shot: normalizeShot(out.shot, E, (s.chars || []).length), usage, model: CFG.llmModel };
 }
 
@@ -240,23 +245,23 @@ async function createVideo({ provider = 'seedance', image, prompt = '', duration
   const img = await toDataUri(image); if (!img) throw new HttpError(400, '缺少首帧图（已确认的关键帧）');
   let upstreamId;
   if (provider === 'kling') {
-    need(CFG.klingAk && CFG.klingSk, '可灵 KLING_ACCESS_KEY / KLING_SECRET_KEY');
+    need(CFG.klingAk && CFG.klingSk, '可灵 KLING_ACCESS_KEY / KLING_SECRET_KEY', '视频服务');
     const dur = duration > 5 ? '10' : '5'; // 可灵只支持 5 / 10 秒
     const j = await upstream(CFG.klingBase + '/v1/videos/image2video', {
       method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + klingJwt() },
       body: JSON.stringify({ model_name: CFG.klingModel, mode: CFG.klingMode, image: img.replace(/^data:[^,]+,/, ''), prompt: prompt.slice(0, 2400), duration: dur }),
-    }, '可灵');
+    }, '视频服务');
     if (j.code && j.code !== 0) throw new HttpError(400, '可灵返回错误：' + (j.message || j.code));
     upstreamId = j.data?.task_id;
   } else {
-    need(CFG.arkKey, '火山方舟 ARK_API_KEY');
+    need(CFG.arkKey, '火山方舟 ARK_API_KEY', '视频服务');
     // Seedance 2.0 mini 支持 4~15 秒；镜头更短时生成 4 秒，合成成片时再裁到分镜时长
     const dur = Math.max(4, Math.min(15, Math.round(duration)));
     const j = await upstream(CFG.arkBase + '/contents/generations/tasks', {
       method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.arkKey },
       // 首帧图已经是目标比例，ratio 用 adaptive 跟随首帧
       body: JSON.stringify({ model: CFG.seedanceModel, content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: img }, role: 'first_frame' }], resolution: CFG.seedanceRes, ratio: 'adaptive', duration: dur, watermark: false, generate_audio: false }),
-    }, 'Seedance');
+    }, '视频服务');
     upstreamId = j.id;
   }
   if (!upstreamId) throw new HttpError(502, '视频接口没有返回任务 id');
@@ -269,11 +274,11 @@ async function queryVideo(id) {
   if (t.error) return { status: 'failed', error: t.error };
   let status, remote, error;
   if (t.provider === 'kling') {
-    const j = await upstream(`${CFG.klingBase}/v1/videos/image2video/${t.upstreamId}`, { headers: { authorization: 'Bearer ' + klingJwt() } }, '可灵');
+    const j = await upstream(`${CFG.klingBase}/v1/videos/image2video/${t.upstreamId}`, { headers: { authorization: 'Bearer ' + klingJwt() } }, '视频服务');
     const s = j.data?.task_status; status = s === 'succeed' ? 'succeeded' : s === 'failed' ? 'failed' : 'running';
     remote = j.data?.task_result?.videos?.[0]?.url; error = j.data?.task_status_msg;
   } else {
-    const j = await upstream(`${CFG.arkBase}/contents/generations/tasks/${t.upstreamId}`, { headers: { authorization: 'Bearer ' + CFG.arkKey } }, 'Seedance');
+    const j = await upstream(`${CFG.arkBase}/contents/generations/tasks/${t.upstreamId}`, { headers: { authorization: 'Bearer ' + CFG.arkKey } }, '视频服务');
     const s = String(j.status || '').toLowerCase(); status = s === 'succeeded' ? 'succeeded' : ['failed', 'cancelled', 'expired'].includes(s) ? 'failed' : 'running';
     remote = j.content?.video_url; error = j.error?.message;
   }
@@ -336,7 +341,8 @@ export const server = http.createServer(async (req, res) => {
       if (CFG.accessToken && p !== '/api/health' && !tokenOk(req.headers['x-access-token'])) throw new HttpError(401, '需要访问口令');
       if (p === '/api/health') return send(res, 200, {
         ok: true, auth: !!CFG.accessToken, ffmpeg: HAS_FFMPEG,
-        models: { image: !!CFG.arkKey && CFG.imageModel, llm: !!CFG.llmKey && CFG.llmModel, seedance: !!CFG.arkKey && CFG.seedanceModel, kling: !!(CFG.klingAk && CFG.klingSk) && CFG.klingModel },
+        // 只告诉页面各项能不能用，不暴露具体模型
+        models: { image: !!CFG.arkKey, llm: !!CFG.llmKey, seedance: !!CFG.arkKey, kling: !!(CFG.klingAk && CFG.klingSk) },
       });
       if (req.method === 'POST' && p === '/api/image') return send(res, 200, await genImage(await readJson(req)));
       if (req.method === 'POST' && p === '/api/storyboard') return send(res, 200, await genStoryboard(await readJson(req)));

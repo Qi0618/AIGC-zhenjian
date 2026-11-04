@@ -99,7 +99,7 @@ test('normalizeShot 修正不合法的取值', () => {
 test('health 不需要口令，并报告模型配置', async () => {
   const j = await (await fetch(base + '/api/health')).json();
   assert.equal(j.ok, true); assert.equal(j.auth, true);
-  assert.ok(j.models.image && j.models.llm && j.models.seedance); assert.equal(j.models.kling, false);
+  assert.deepEqual(j.models, { image: true, llm: true, seedance: true, kling: false }, '只返回能不能用，不暴露模型 ID');
 });
 
 test('设置了 ACCESS_TOKEN 时，没有或错误的口令返回 401', async () => {
@@ -129,7 +129,7 @@ test('生图：缺少提示词返回 400', async () => {
 
 test('上游响应体传到一半超时：返回 504 和中文提示', async () => {
   const r = await post('/api/image', { prompt: 'SLOW' });
-  assert.equal(r.status, 504); assert.match((await r.json()).error, /Seedream 超过 2 秒没有完成.*UPSTREAM_TIMEOUT_MS/);
+  assert.equal(r.status, 504); assert.match((await r.json()).error, /生图服务 超过 2 秒没有完成.*UPSTREAM_TIMEOUT_MS/);
 });
 
 test('下载中途断开：支持 Range 时从断点续传', async () => {
@@ -178,9 +178,10 @@ test('视频：创建任务 → 查询完成 → 下载到本地；任务记录�
   assert.equal((await fetch(base + '/api/video/nope', { headers: H })).status, 404);
 });
 
-test('可灵未配置时返回 503 和提示', async () => {
+test('精品视频未配置时返回 503，提示里不出现模型名', async () => {
   const r = await post('/api/video', { provider: 'kling', image: 'data:image/png;base64,AA==' });
-  assert.equal(r.status, 503); assert.match((await r.json()).error, /可灵/);
+  assert.equal(r.status, 503); const msg = (await r.json()).error;
+  assert.match(msg, /视频服务暂未开通/); assert.doesNotMatch(msg, /可灵|Kling|KLING/);
 });
 
 test('静态文件：白名单之外带扩展名的路径 404，其余回落首页', async () => {

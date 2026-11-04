@@ -149,9 +149,8 @@ function saveUrl(url,name){const a=document.createElement('a');a.href=url;a.down
 function showGate(){$('#gate').hidden=false;setTimeout(()=>$('#gateIn').focus(),50)}
 function applyMode(){
   if(!LIVE.on)return;const M=LIVE.models,any=M.image||M.llm||M.seedance;
-  $('#modeKicker').innerHTML=any?'<b>已接入</b>Seedream 4.0 · DeepSeek V4.1 Flash · Seedance · 可灵':'<b>待配置</b>后端已连接，还没有填写模型密钥';
-  $$('.modeBadge').forEach(b=>b.innerHTML=any?'<b style="color:var(--ok)">●</b> 已接入模型':'<b>●</b> 后端未配置密钥');
-  $$('#modelChips i[data-m]').forEach(i=>i.textContent=M[i.dataset.m]?'已接入':'未配置');
+  $('#modeKicker').innerHTML=any?'<b>已就绪</b>AI 生图、分镜与视频生成均可使用':'<b>待配置</b>服务已连接，还没有完成配置';
+  $$('.modeBadge').forEach(b=>b.innerHTML=any?'<b style="color:var(--ok)">●</b> 已就绪':'<b>●</b> 服务未配置');
   if(LIVE.auth&&!LIVE.token)showGate();
 }
 const DEFAULT_CREDITS=3000;
@@ -883,7 +882,7 @@ $('#edGo').onclick=()=>{
 
 // ---- 视频生成
 const playList=()=>dr().shots.filter(s=>s.kf==='ok');
-const vModel=()=>dr().videoModel==='kling'?'kling':'seedance';
+const vModel=()=>LIVE.on&&!LIVE.models.seedance&&LIVE.models.kling?'kling':'seedance';
 const shotVCost=(s,m=vModel())=>m==='kling'?(s.dur>5?2:1)*PRICING.klingPer5s:Math.max(4,Math.min(15,Math.round(s.dur)))*PRICING.seedancePerSec;
 const videoCost=(arr,m)=>arr.reduce((a,s)=>a+shotVCost(s,m),0);
 function renderStudio(){
@@ -892,7 +891,6 @@ function renderStudio(){
   $('#vHint').textContent=`${ok.length} 个已确认镜头 · ${totalDur(ok)} 秒 · 已完成 ${done}/${ok.length}${ok.length<S.length?` · ${S.length-ok.length} 镜关键帧未确认，不会生成`:''}`;
   $('#exportVideo').disabled=!(ok.length&&done===ok.length);$('#playBtn').disabled=!done;
   const cost=videoCost(todo);
-  $$('#vModel .vm').forEach(b=>{const m=b.dataset.v,off=LIVE.on&&!LIVE.models[m];b.setAttribute('aria-pressed',m===vModel());b.disabled=busy||off;b.title=off?'服务器还没有配置这个模型的密钥':'';$('[data-pr]',b).textContent=m==='kling'?PRICING.klingPer5s+' 积分/5秒':PRICING.seedancePerSec+' 积分/秒'});
   $('#genVideo').disabled=!todo.length||busy||cost>APP.credits;
   $('#genVideo').innerHTML=busy?'生成中…':`生成视频${todo.length?` <span class="cost">· ${num(cost)} 积分</span>`:''}`;
   $('#queue').innerHTML=S.map((s,i)=>{
@@ -932,7 +930,6 @@ function stopPlay(){playing=false;cancelAnimationFrame(raf);$('#playBtn').textCo
 $('#playBtn').onclick=()=>{if(playing){stopPlay();return}const tot=totalDur(playList());if(dr().time>=tot-.05)dr().time=0;playing=true;$('#playBtn').textContent='暂停';last=performance.now();
   const loop=now=>{dr().time+=(now-last)/1000;last=now;if(dr().time>=tot){dr().time=tot;stopPlay()}movePH();drawPlayer();if(playing)raf=requestAnimationFrame(loop)};raf=requestAnimationFrame(loop)};
 $('#vVoice').onchange=e=>{dr().voice=e.target.value;touch(DRAMA);drawPlayer()};
-$('#vModel').onclick=e=>{const b=e.target.closest('.vm');if(!b||b.disabled)return;dr().videoModel=b.dataset.v;touch(DRAMA);renderStudio()};
 $('#genVideo').onclick=()=>{
   const proj=DRAMA,m=vModel(),todo=playList().filter(s=>s.video!=='done');if(!todo.length)return;
   const cost=videoCost(todo,m);if(!spend(proj,cost))return;
@@ -946,7 +943,7 @@ $('#genVideo').onclick=()=>{
       else{s.video=s.kf==='ok'?'done':'none';s.p=100;s.vModel=m;if(r&&r.url)s.videoUrl=r.url}
       active--;rer();
       if(!q.length&&!active){touch(proj);const ok=todo.length-failed;
-        if(ok)logHistory(proj,`生成视频 ${ok} 镜`,`${m==='kling'?'可灵 2.5 Turbo':'Seedance 2.0 mini'} · ${proj.state.title}`,cost-back);
+        if(ok)logHistory(proj,`生成视频 ${ok} 镜`,proj.state.title,cost-back);
         if(DRAMA===proj)toast(failed?`${failed} 个镜头生成失败，已退回 ${num(back)} 积分：${lastErr}`:`全部镜头已生成，消耗 ${num(cost)} 积分`)}
       else next()})}};
   next();rer();
@@ -967,7 +964,7 @@ function resumeVideos(proj,shots){
   rer();toast(`「${proj.name}」有 ${shots.length} 个视频任务还在生成，正在继续查询`);
 }
 $('#exportVideo').onclick=async()=>{
-  const L=playList();if(!LIVE.on||!L.every(s=>s.videoUrl)){toast('演示模式不能导出。部署后端并接入视频模型后，可导出 MP4 成片');return}
+  const L=playList();if(!LIVE.on||!L.every(s=>s.videoUrl)){toast('演示模式不能导出。部署后端后可导出 MP4 成片');return}
   const b=$('#exportVideo');b.disabled=true;b.textContent='合成中…';
   try{const r=await api('/api/concat',{urls:L.map(s=>s.videoUrl),durs:L.map(s=>s.dur)});saveUrl(r.url,`${dr().title||'短剧'}.mp4`);toast('成片已合成，开始下载')}
   catch(e){toast(e.message+'，改为逐个下载镜头');L.forEach((s,i)=>setTimeout(()=>saveUrl(s.videoUrl,`S${pad2(dr().shots.indexOf(s)+1)}.mp4`),i*400))}

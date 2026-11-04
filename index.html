@@ -6,7 +6,7 @@
 <title>帧间 Zhenjian</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500&display=swap">
-<link rel="stylesheet" href="styles.css?v=0.8.3">
+<link rel="stylesheet" href="styles.css?v=0.8.4">
 </head>
 <body>
 <div class="app">
@@ -44,7 +44,6 @@
         <span class="kicker" id="modeKicker"><b>Demo</b>演示模式：图片与视频由画布模拟生成</span>
         <h1>一句话，<em>绘出商品图</em><br>一个故事，<em>拍成短剧</em></h1>
         <p>批量生成电商主图、场景图并一键适配各平台尺寸；从故事梗概到分镜、关键帧、成片，一条流水线完成。</p>
-        <div class="models" id="modelChips"><span>生图 · Seedream 4.0<i data-m="image">演示</i></span><span>分镜 · DeepSeek V4.1 Flash<i data-m="llm">演示</i></span><span>视频 · Seedance 2.0 mini<i data-m="seedance">演示</i></span><span>精品视频 · 可灵 2.5 Turbo<i data-m="kling">演示</i></span></div>
       </div>
       <div class="entries">
         <button class="panel entry" type="button" data-view-link="shop">
@@ -98,7 +97,7 @@
             </div>
             <div class="plan-sum" id="planSum"></div>
           </div>
-          <div class="gen-row"><button class="btn primary big" id="genBtn" type="button">生成整套图</button><span class="model-note">生图模型 <b>Seedream 4.0</b></span></div>
+          <div class="gen-row"><button class="btn primary big" id="genBtn" type="button">生成整套图</button></div>
         </div>
 
         <div class="results">
@@ -167,7 +166,7 @@
           <div class="csec-h"><h3>角色卡</h3><span class="hint">参考图和主色会带进每个镜头，保证同一角色前后一致</span></div>
           <div class="cast" id="cast"></div>
         </div>
-        <div class="brief-foot"><span class="hint">切换题材会填入对应示例；修改过内容后不再覆盖。</span><span class="model-note">分镜模型 <b>DeepSeek V4.1 Flash</b></span><button class="btn primary" id="toScript">生成分镜脚本</button></div>
+        <div class="brief-foot"><span class="hint">切换题材会填入对应示例；修改过内容后不再覆盖。</span><button class="btn primary" id="toScript">生成分镜脚本</button></div>
       </div>
 
       <div id="d2" hidden>
@@ -193,10 +192,6 @@
       <div id="d4" class="studio" hidden>
         <div class="studio-left">
           <div class="panel vset">
-            <div class="field"><span class="label">视频模型</span><div class="vmodel" id="vModel">
-              <button type="button" class="vm" data-v="seedance"><span class="tier">推荐</span><b>Seedance 2.0 mini</b><span class="pr" data-pr></span><small>720p · 出片快、性价比高，最短按 4 秒计费</small></button>
-              <button type="button" class="vm" data-v="kling"><span class="tier">精品</span><b>可灵 2.5 Turbo</b><span class="pr" data-pr></span><small>1080p · 人物运动更自然，按 5 秒为单位计费</small></button>
-            </div></div>
             <div class="field"><label class="label" for="vVoice">配音</label><select id="vVoice"><option>AI 配音 + 字幕</option><option>仅字幕</option><option>无</option></select></div>
             <span class="hint" id="vHint"></span>
             <button class="btn" id="exportVideo" disabled>导出成片</button>
@@ -247,6 +242,6 @@
 </div>
 <div class="toast" id="toast" hidden></div>
 <div class="gate" id="gate" hidden><form class="panel" id="gateForm"><h3 style="margin:0">输入访问口令</h3><span class="hint">这台服务器设置了访问口令，请向管理员获取。</span><input id="gateIn" type="password" autocomplete="current-password" placeholder="访问口令" aria-label="访问口令"><button class="btn primary" type="submit">进入</button></form></div>
-<script src="app.js?v=0.8.3"></script>
+<script src="app.js?v=0.8.4"></script>
 </body>
 </html>
