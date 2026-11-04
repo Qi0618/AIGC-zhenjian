@@ -21,6 +21,9 @@ function startMock() {
       let body = ''; for await (const c of req) body += c;
       const j = body ? JSON.parse(body) : null; calls.push({ method: req.method, url: req.url, body: j, auth: req.headers.authorization });
       const json = o => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
+      if (req.url === '/images/generations' && j.prompt === 'SLOW') { // 先回响应头，响应体迟迟不发完
+        res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"data":'); return;
+      }
       if (req.url === '/images/generations') return json({ data: [{ b64_json: PNG.toString('base64') }] });
       if (req.url === '/chat/completions') {
         const ask = j.messages[1].content;
@@ -42,7 +45,7 @@ before(async () => {
   await startMock();
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zhenjian-test-'));
   Object.assign(process.env, {
-    DATA_DIR: dataDir, ARK_API_KEY: 'ark-test', ARK_BASE_URL: mockUrl, ACCESS_TOKEN: 'secret',
+    DATA_DIR: dataDir, ARK_API_KEY: 'ark-test', UPSTREAM_TIMEOUT_MS: '1500', ARK_BASE_URL: mockUrl, ACCESS_TOKEN: 'secret',
     // 显式置空，避免读到本地 .env 里的真实密钥
     DEEPSEEK_API_KEY: '', KLING_ACCESS_KEY: '', KLING_SECRET_KEY: '',
   });
@@ -110,6 +113,11 @@ test('生图：结果保存到本地，可以按 Range 读取', async () => {
 test('生图：缺少提示词返回 400', async () => {
   const r = await post('/api/image', {});
   assert.equal(r.status, 400); assert.match((await r.json()).error, /提示词/);
+});
+
+test('上游响应体传到一半超时：返回 504 和中文提示', async () => {
+  const r = await post('/api/image', { prompt: 'SLOW' });
+  assert.equal(r.status, 504); assert.match((await r.json()).error, /Seedream 超过 2 秒没有完成.*UPSTREAM_TIMEOUT_MS/);
 });
 
 test('分镜：能解析带代码块的回复，并修正取值', async () => {

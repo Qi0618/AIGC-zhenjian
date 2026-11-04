@@ -62,13 +62,19 @@ function tokenOk(got) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 const UPSTREAM_TIMEOUT = +(process.env.UPSTREAM_TIMEOUT_MS || 180000);
-async function upstream(url, opt, label) {
-  let r;
-  try { r = await fetch(url, { ...opt, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT) }); } catch (e) {
-    if (e.name === 'TimeoutError') throw new HttpError(504, `${label} 响应超时，请稍后重试`);
+// 超时从发请求一直算到读完响应体：图片结果有 1~2 MB，网速慢时主要耗在下载上
+async function fetchBody(url, opt, label, as = 'text') {
+  try {
+    const r = await fetch(url, { ...opt, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT) });
+    return { r, body: as === 'buffer' ? Buffer.from(await r.arrayBuffer()) : await r.text() };
+  } catch (e) {
+    if (e.name === 'TimeoutError') throw new HttpError(504, `${label} 超过 ${Math.round(UPSTREAM_TIMEOUT / 1000)} 秒没有完成，网络较慢时可以在 .env 里调大 UPSTREAM_TIMEOUT_MS`);
     throw new HttpError(502, `${label} 连接失败：${e.message}`);
   }
-  const text = await r.text(); let j; try { j = JSON.parse(text); } catch { j = { raw: text.slice(0, 500) }; }
+}
+async function upstream(url, opt, label) {
+  const { r, body: text } = await fetchBody(url, opt, label);
+  let j; try { j = JSON.parse(text); } catch { j = { raw: text.slice(0, 500) }; }
   if (!r.ok || (j && j.error)) {
     const msg = j?.error?.message || j?.message || j?.raw || r.statusText;
     throw new HttpError(r.status >= 400 && r.status < 500 ? 400 : 502, `${label} 返回错误：${msg}`);
@@ -78,10 +84,9 @@ async function upstream(url, opt, label) {
 async function saveFile(buf, ext) { const name = newId() + '.' + ext; await fsp.writeFile(path.join(FILES, name), buf); return '/files/' + name; }
 function extOf(buf) { return buf[0] === 0x89 ? 'png' : buf[0] === 0xff ? 'jpg' : buf.slice(8, 12).toString() === 'WEBP' ? 'webp' : 'png'; }
 async function download(url, ext) {
-  let r;
-  try { r = await fetch(url, { signal: AbortSignal.timeout(UPSTREAM_TIMEOUT) }); } catch (e) { throw new HttpError(502, '下载生成结果失败：' + e.message); }
+  const { r, body: buf } = await fetchBody(url, {}, '下载生成结果', 'buffer');
   if (!r.ok) throw new HttpError(502, '下载生成结果失败（' + r.status + '）');
-  const buf = Buffer.from(await r.arrayBuffer()); return saveFile(buf, ext || extOf(buf));
+  return saveFile(buf, ext || extOf(buf));
 }
 // 前端传来的图片：data URI 原样转发；/files/xxx 读本地文件转成 data URI
 async function toDataUri(src) {
