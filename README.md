@@ -18,6 +18,31 @@
 
 > 2026-09 起火山方舟停止开通 Seedream 4.0（250828 版）、Seedance 1.0 pro-fast，DeepSeek V3.1 已于 2026-03 下线，本项目已按官方迁移建议换成上表型号。
 
+## 给别人用：打包成解压即用的压缩包
+
+```bash
+npm run package                # 打 Mac（Apple 芯片 / Intel）和 Windows 三个包
+npm run package -- mac-arm64   # 只打一个
+```
+
+压缩包在 `dist/` 里，自带 Node 运行环境，对方不需要安装任何东西：
+
+```
+帧间-<版本>-mac-arm64/
+├── 启动帧间.command   Mac 双击启动（Windows 版是「启动帧间.bat」）
+├── 使用说明.txt
+├── app/              程序
+├── runtime/          自带的 Node 运行环境
+└── data/             第一次启动后生成：项目、图片、视频、密钥都在这里
+```
+
+对方的使用流程：解压 → 双击启动 → 浏览器自动打开 → 在「设置」里粘贴自己的 API Key → 开始生成。费用由各平台直接从对方自己的账户扣除。
+
+- 打包需要在 Mac 或 Linux 上运行（用到 `tar`、`unzip`、`zip`）。Node 安装包从 npmmirror 或 nodejs.org 下载，并用官方 SHASUMS256 校验，缓存在 `.cache/`。
+- 双击启动时，如果同一份数据的帧间已经在运行，会直接打开浏览器；端口被其他程序占用时自动换下一个。
+- 包里没有带 ffmpeg，导出短剧时会改为逐个下载镜头。可以用 `FFMPEG_PATH` 指定 ffmpeg 位置。
+- 启动脚本没有代码签名：Mac 第一次需要右键 →「打开」，Windows 可能要在 SmartScreen 里点「仍要运行」。`使用说明.txt` 里写了步骤。
+
 ## 两种运行方式
 
 | | 演示模式 | 正式模式 |
@@ -144,6 +169,7 @@ npm test
 ├── styles.css        样式（明暗两套主题）
 ├── app.js            前端逻辑：模型调用、存储、电商模块、短剧模块、项目与历史
 ├── server/index.mjs  后端：托管页面 + 代理模型接口 + 保存生成结果 + 合成成片
+├── scripts/package.mjs 打包成解压即用的压缩包（npm run package）
 ├── test/             后端测试（npm test）
 ├── Dockerfile        正式模式镜像（含 ffmpeg）
 ├── .env.example      配置模板

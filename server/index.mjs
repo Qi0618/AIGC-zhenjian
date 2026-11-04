@@ -45,7 +45,11 @@ function applyKeys() {
   CFG.llmModel = ds ? (process.env.DEEPSEEK_MODEL || 'deepseek-chat') : (process.env.ARK_LLM_MODEL || 'deepseek-v4-1-flash-260910');
 }
 applyKeys();
-const HAS_FFMPEG = spawnSync('ffmpeg', ['-version']).status === 0;
+// 打包版可以把 ffmpeg 放在自带目录里，用 FFMPEG_PATH 指定
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const HAS_FFMPEG = spawnSync(FFMPEG, ['-version']).status === 0;
+// 用数据目录区分不同的帧间：双击启动时，如果同一份数据的帧间已经在跑，就直接打开它
+const INSTANCE = crypto.createHash('sha1').update(CFG.dataDir).digest('hex').slice(0, 10);
 
 /* ---------------- 小工具 ---------------- */
 function loadEnv(f) {
@@ -314,7 +318,7 @@ async function concatVideos({ urls, durs }) {
   const filt = files.map((_, i) => `[${i}:v]${+durs?.[i] > 0 ? `trim=duration=${+durs[i]},setpts=PTS-STARTPTS,` : ''}scale=720:-2:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2,setsar=1,fps=24[v${i}]`).join(';')
     + ';' + files.map((_, i) => `[v${i}]`).join('') + `concat=n=${files.length}:v=1:a=0[v]`;
   await new Promise((ok, bad) => {
-    const p = spawn('ffmpeg', ['-y', ...inputs, '-filter_complex', filt, '-map', '[v]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', out], { stdio: 'ignore' });
+    const p = spawn(FFMPEG, ['-y', ...inputs, '-filter_complex', filt, '-map', '[v]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', out], { stdio: 'ignore' });
     p.on('exit', c => (c === 0 ? ok() : bad(new HttpError(500, '合成失败（ffmpeg 退出码 ' + c + '）')))); p.on('error', bad);
   });
   return { url: '/files/' + path.basename(out) };
@@ -474,7 +478,7 @@ export const server = http.createServer(async (req, res) => {
       guard(req);
       if (CFG.accessToken && p !== '/api/health' && !tokenOk(req.headers['x-access-token'])) throw new HttpError(401, '需要访问口令');
       if (p === '/api/health') return send(res, 200, {
-        ok: true, auth: !!CFG.accessToken, ffmpeg: HAS_FFMPEG,
+        ok: true, app: 'zhenjian', instance: INSTANCE, auth: !!CFG.accessToken, ffmpeg: HAS_FFMPEG,
         // 只告诉页面各项能不能用，不暴露具体模型
         models: modelsStatus(), settings: isLoopback(req) || !!CFG.accessToken,
       });
@@ -517,10 +521,37 @@ export const server = http.createServer(async (req, res) => {
 // 直接运行时才监听端口；测试里 import 这个文件时不自动启动
 const realpath = f => { try { return fs.realpathSync(f); } catch { return path.resolve(f); } };
 const isMain = !!process.argv[1] && realpath(process.argv[1]) === realpath(fileURLToPath(import.meta.url));
-if (isMain) server.listen(CFG.port, CFG.host, () => {
-  console.log(`帧间已启动：http://localhost:${CFG.port}${LOOPBACK.has(CFG.host) ? '' : `（监听 ${CFG.host}，其他设备也能访问${CFG.accessToken ? '' : '，建议设置 ACCESS_TOKEN'}）`}`);
-  console.log(`  火山方舟（Seedream / DeepSeek / Seedance）：${CFG.arkKey ? '已配置' : '未配置，请在网页「设置」里填写'}`);
-  console.log(`  分镜模型：${CFG.llmKey ? CFG.llmModel + ' @ ' + CFG.llmBase : '未配置'}`);
-  console.log(`  可灵 2.5 Turbo：${CFG.klingAk && CFG.klingSk ? '已配置' : '未配置（精品档不可用）'}`);
-  console.log(`  ffmpeg 合成成片：${HAS_FFMPEG ? '可用' : '未安装'}`);
-});
+function openBrowser(url) {
+  const [cmd, args] = process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]];
+  try { spawn(cmd, args, { stdio: 'ignore', detached: true }).on('error', () => {}).unref(); } catch {}
+}
+// 端口被占用时：如果占着的就是这一份帧间，直接打开浏览器后退出；否则换下一个端口
+function start(port, tries = 0) {
+  const onError = async e => {
+    server.off('listening', onListening);
+    if (e.code !== 'EADDRINUSE' || tries >= 10) { console.error('启动失败：' + e.message); process.exit(1); }
+    const same = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(1500) })
+      .then(r => r.json()).then(j => j.app === 'zhenjian' && j.instance === INSTANCE).catch(() => false);
+    if (same) {
+      console.log(`帧间已经在运行：http://localhost:${port}${process.env.OPEN_BROWSER === '1' ? '，已为你打开浏览器' : ''}`);
+      if (process.env.OPEN_BROWSER === '1') openBrowser(`http://localhost:${port}`);
+      setTimeout(() => process.exit(0), 300); return;
+    }
+    console.log(`端口 ${port} 被其他程序占用，改用 ${port + 1}`);
+    start(port + 1, tries + 1);
+  };
+  const onListening = () => {
+    server.off('error', onError);
+    const url = `http://localhost:${server.address().port}`;
+    console.log(`帧间已启动：${url}${LOOPBACK.has(CFG.host) ? '' : `（监听 ${CFG.host}，其他设备也能访问${CFG.accessToken ? '' : '，建议设置 ACCESS_TOKEN'}）`}`);
+    console.log(`  数据保存在：${CFG.dataDir}`);
+    console.log(`  火山方舟（Seedream / DeepSeek / Seedance）：${CFG.arkKey ? '已配置' : '未配置，请在网页「设置」里填写'}`);
+    console.log(`  分镜模型：${CFG.llmKey ? CFG.llmModel + ' @ ' + CFG.llmBase : '未配置'}`);
+    console.log(`  可灵 2.5 Turbo：${CFG.klingAk && CFG.klingSk ? '已配置' : '未配置（精品档不可用）'}`);
+    console.log(`  ffmpeg 合成成片：${HAS_FFMPEG ? '可用' : '未安装（导出时改为逐个下载镜头）'}`);
+    if (process.env.OPEN_BROWSER === '1') { console.log('  正在打开浏览器… 使用期间请不要关闭这个窗口'); openBrowser(url); }
+  };
+  server.once('error', onError); server.once('listening', onListening);
+  server.listen(port, CFG.host);
+}
+if (isMain) start(CFG.port);
