@@ -83,9 +83,39 @@ async function upstream(url, opt, label) {
 }
 async function saveFile(buf, ext) { const name = newId() + '.' + ext; await fsp.writeFile(path.join(FILES, name), buf); return '/files/' + name; }
 function extOf(buf) { return buf[0] === 0x89 ? 'png' : buf[0] === 0xff ? 'jpg' : buf.slice(8, 12).toString() === 'WEBP' ? 'webp' : 'png'; }
+// 下载生成结果（图片 / 视频）。网络不稳时连接可能传到一半被断开，
+// 这里会用 Range 从断开处接着下载，最多重试 DOWNLOAD_RETRIES 次
+const DOWNLOAD_RETRIES = +(process.env.DOWNLOAD_RETRIES || 5);
+export async function downloadBuffer(url) {
+  const chunks = []; let got = 0, total = null, lastErr;
+  for (let attempt = 0; attempt <= DOWNLOAD_RETRIES; attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, Math.min(8000, 1000 * attempt)));
+    try {
+      const r = await fetch(url, { headers: got ? { range: `bytes=${got}-` } : {}, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT) });
+      if (r.status === 416 && total !== null && got >= total) break;
+      if (!r.ok) {
+        const err = new HttpError(502, '下载生成结果失败（' + r.status + '）');
+        err.noRetry = r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429; // 如链接过期
+        throw err;
+      }
+      if (got && r.status !== 206) { chunks.length = 0; got = 0; } // 不支持断点续传，只能从头来
+      if (total === null) {
+        const cr = r.headers.get('content-range'), cl = r.headers.get('content-length');
+        total = cr ? +cr.split('/')[1] || null : cl ? got + +cl : null;
+      }
+      for await (const c of r.body) { chunks.push(c); got += c.length; }
+      if (total === null || got >= total) return Buffer.concat(chunks);
+      lastErr = new Error('连接提前结束');
+    } catch (e) {
+      if (e.noRetry) throw e;
+      lastErr = e;
+    }
+  }
+  if (total !== null && got >= total) return Buffer.concat(chunks);
+  throw new HttpError(502, `下载生成结果失败：重试 ${DOWNLOAD_RETRIES} 次后仍未完成（已下载 ${Math.round(got / 1024)} KB${total ? ' / ' + Math.round(total / 1024) + ' KB' : ''}）：${lastErr?.message || ''}`);
+}
 async function download(url, ext) {
-  const { r, body: buf } = await fetchBody(url, {}, '下载生成结果', 'buffer');
-  if (!r.ok) throw new HttpError(502, '下载生成结果失败（' + r.status + '）');
+  const buf = await downloadBuffer(url);
   return saveFile(buf, ext || extOf(buf));
 }
 // 前端传来的图片：data URI 原样转发；/files/xxx 读本地文件转成 data URI
@@ -113,7 +143,8 @@ async function genImage({ prompt, images = [], width = 1024, height = 1024 }) {
   need(CFG.arkKey, '火山方舟 ARK_API_KEY');
   if (!prompt) throw new HttpError(400, '缺少提示词');
   const refs = (await Promise.all(images.slice(0, 6).map(toDataUri))).filter(Boolean);
-  const body = { model: CFG.imageModel, prompt, size: seedreamSize(width, height), response_format: 'b64_json', watermark: false };
+  const body = { model: CFG.imageModel, prompt, size: seedreamSize(width, height), response_format: 'url', watermark: false };
+  // 用 url 而不是 b64_json：接口在图片生成好后马上返回，图片本身再单独下载（可以断点续传）
   if (refs.length) body.image = refs.length === 1 ? refs[0] : refs;
   const j = await upstream(CFG.arkBase + '/images/generations', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.arkKey }, body: JSON.stringify(body),

@@ -9,7 +9,8 @@ import path from 'node:path';
 // 1×1 PNG
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 const MP4 = Buffer.from('0123456789abcdef');
-const calls = [];
+const calls = [], hits = {};
+const BIG = Buffer.from(Array.from({ length: 50000 }, (_, i) => i % 251));
 let mock, mockUrl, app, base, dataDir;
 
 const ENUMS = { scales: ['远景', '全景', '中景', '近景', '特写'], moods: ['night', 'warm'], cams: ['固定', '推'] };
@@ -24,7 +25,17 @@ function startMock() {
       if (req.url === '/images/generations' && j.prompt === 'SLOW') { // 先回响应头，响应体迟迟不发完
         res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"data":'); return;
       }
-      if (req.url === '/images/generations') return json({ data: [{ b64_json: PNG.toString('base64') }] });
+      if (req.url === '/images/generations') return json({ data: [{ url: mockUrl + '/img.png' }] });
+      if (req.url === '/img.png') { res.writeHead(200, { 'content-type': 'image/png', 'content-length': PNG.length }); return res.end(PNG); }
+      // 每次只传一半就断开；支持 Range 的版本可以续传，另一个每次都从头传
+      if (req.url === '/flaky-range' || req.url === '/flaky-norange') {
+        const n = (hits[req.url] = (hits[req.url] || 0) + 1), m = /bytes=(\d+)-/.exec(req.headers.range || '');
+        const start = req.url === '/flaky-range' && m ? +m[1] : 0, rest = BIG.subarray(start);
+        const head = start ? { 'content-range': `bytes ${start}-${BIG.length - 1}/${BIG.length}`, 'content-length': rest.length } : { 'content-length': BIG.length };
+        res.writeHead(start ? 206 : 200, head);
+        if (req.url === '/flaky-range' ? n <= 2 : n === 1) { res.write(rest.subarray(0, Math.ceil(rest.length / 2))); return setTimeout(() => res.destroy(), 20); }
+        return res.end(rest);
+      }
       if (req.url === '/chat/completions') {
         const ask = j.messages[1].content;
         // 故意包一层 Markdown 代码块、塞进不合法的取值，检查后端的容错
@@ -45,7 +56,7 @@ before(async () => {
   await startMock();
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zhenjian-test-'));
   Object.assign(process.env, {
-    DATA_DIR: dataDir, ARK_API_KEY: 'ark-test', UPSTREAM_TIMEOUT_MS: '1500', ARK_BASE_URL: mockUrl, ACCESS_TOKEN: 'secret',
+    DATA_DIR: dataDir, ARK_API_KEY: 'ark-test', UPSTREAM_TIMEOUT_MS: '1500', DOWNLOAD_RETRIES: '3', ARK_BASE_URL: mockUrl, ACCESS_TOKEN: 'secret',
     // 显式置空，避免读到本地 .env 里的真实密钥
     DEEPSEEK_API_KEY: '', KLING_ACCESS_KEY: '', KLING_SECRET_KEY: '',
   });
@@ -100,9 +111,10 @@ test('设置了 ACCESS_TOKEN 时，没有或错误的口令返回 401', async ()
 test('生图：结果保存到本地，可以按 Range 读取', async () => {
   const r = await post('/api/image', { prompt: '一瓶精华', width: 800, height: 800 });
   assert.equal(r.status, 200); const { url } = await r.json();
-  assert.match(url, /^\/files\/[a-z0-9]+\.jpg$/);
+  assert.match(url, /^\/files\/[a-z0-9]+\.png$/, '按图片实际格式命名');
   const call = calls.find(c => c.url === '/images/generations');
   assert.equal(call.auth, 'Bearer ark-test'); assert.equal(call.body.size, app.seedreamSize(800, 800));
+  assert.equal(call.body.response_format, 'url');
   const full = Buffer.from(await (await fetch(base + url)).arrayBuffer());
   assert.deepEqual(full, PNG);
   const part = await fetch(base + url, { headers: { range: 'bytes=-4' } });
@@ -118,6 +130,21 @@ test('生图：缺少提示词返回 400', async () => {
 test('上游响应体传到一半超时：返回 504 和中文提示', async () => {
   const r = await post('/api/image', { prompt: 'SLOW' });
   assert.equal(r.status, 504); assert.match((await r.json()).error, /Seedream 超过 2 秒没有完成.*UPSTREAM_TIMEOUT_MS/);
+});
+
+test('下载中途断开：支持 Range 时从断点续传', async () => {
+  const buf = await app.downloadBuffer(mockUrl + '/flaky-range');
+  assert.deepEqual(buf, BIG); assert.equal(hits['/flaky-range'], 3);
+});
+
+test('下载中途断开：不支持 Range 时从头重新下载', async () => {
+  assert.deepEqual(await app.downloadBuffer(mockUrl + '/flaky-norange'), BIG);
+});
+
+test('下载链接失效（404）时不重试，直接报错', async () => {
+  const t0 = Date.now();
+  await assert.rejects(app.downloadBuffer(mockUrl + '/gone'), /下载生成结果失败（404）/);
+  assert.ok(Date.now() - t0 < 500);
 });
 
 test('分镜：能解析带代码块的回复，并修正取值', async () => {
