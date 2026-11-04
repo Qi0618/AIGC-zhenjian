@@ -25,12 +25,14 @@ const TARGETS = {
   'win-x64': { archive: `node-${NODE_VER}-win-x64.zip`, os: 'win', ffmpeg: 'ffmpeg-win32-x64' },
 };
 
-// ffmpeg 用 ffmpeg-static 项目的预编译版（GPL），从 npmmirror 下载。下载源没有提供校验文件，
-// 所以把第一次下载核对过的 SHA256 固定在这里，之后每次下载都必须一致，防止文件被替换
+// ffmpeg 用 ffmpeg-static 项目的预编译版（GPL），从 npmmirror 下载。镜像没有校验文件，
+// 下面的 SHA256 和 GitHub 发布页（eugeneware/ffmpeg-static b6.1.1）记录的一致，之后每次下载都必须对得上
 const FFMPEG_VER = 'b6.1.1';
 const FFMPEG_BASE = process.env.FFMPEG_MIRROR || `https://cdn.npmmirror.com/binaries/ffmpeg-static/${FFMPEG_VER}`;
 const FFMPEG_SHA256 = {
-  // 'ffmpeg-darwin-arm64.gz': '…',
+  'ffmpeg-darwin-arm64.gz': '8923876afa8db5585022d7860ec7e589af192f441c56793971276d450ed3bbfa',
+  'ffmpeg-darwin-x64.gz': '929b375c1182d956c51f7ac25e0b2b0411fb01f6f407aa15c9758efeb4242106',
+  'ffmpeg-win32-x64.gz': '8883a3dffbd0a16cf4ef95206ea05283f78908dbfb118f73c83f4951dcc06d77',
 };
 const WITH_FFMPEG = !process.argv.includes('--no-ffmpeg');
 
@@ -41,8 +43,10 @@ async function fetchFfmpeg(name) {
   const got = sha256(gz);
   if (!want) throw new Error(`${name}.gz 还没有固定校验值（这次下载的是 ${got}）。人工核对无误后写进 scripts/package.mjs 的 FFMPEG_SHA256，或用 --no-ffmpeg 打不带 ffmpeg 的包`);
   if (got !== want) { fs.rmSync(gz); throw new Error(name + '.gz 校验失败'); }
-  for (const ext of ['LICENSE', 'README']) { const f = path.join(dir, `${name}.${ext}`); if (!fs.existsSync(f)) await download(`${FFMPEG_BASE}/${name}.${ext}`, f); }
-  return { bin: zlib.gunzipSync(fs.readFileSync(gz)), license: path.join(dir, name + '.LICENSE'), readme: path.join(dir, name + '.README') };
+  // 许可证和说明文件的名字不带 ffmpeg- 前缀，例如 darwin-arm64.LICENSE
+  const plat = name.replace(/^ffmpeg-/, '');
+  for (const ext of ['LICENSE', 'README']) { const f = path.join(dir, `${plat}.${ext}`); if (!fs.existsSync(f)) await download(`${FFMPEG_BASE}/${plat}.${ext}`, f); }
+  return { bin: zlib.gunzipSync(fs.readFileSync(gz)), license: path.join(dir, plat + '.LICENSE'), readme: path.join(dir, plat + '.README') };
 }
 
 /* ---- 生成 zip：文件名标记为 UTF-8（Windows 解压中文不乱码），并保留可执行权限 ---- */

@@ -252,9 +252,14 @@ test('合成成片：判断音轨、字幕换行、ffmpeg 滤镜', () => {
   const box = t => Buffer.concat([Buffer.from('....hdlr'), Buffer.alloc(8), Buffer.from(t)]);
   assert.equal(app.hasAudioTrack(Buffer.concat([box('vide'), box('soun')])), true);
   assert.equal(app.hasAudioTrack(box('vide')), false);
-  assert.equal(app.wrapLine('让我进去，我有话要说。这台机器，是我三年前做的。', 14), '让我进去，我有话要说。这台机\n器，是我三年前做的。');
-  assert.equal(app.wrapLine('   ', 14), '');
-  const clips = [{ dur: 3, audio: true, subFile: '/tmp/a b/sub0.txt' }, { dur: 4, audio: false }, { dur: 2, audio: true, subFile: "C:\\x\\it's.txt" }];
+  const rows = app.wrapLine('这一段原本没有声音，用来测试补静音和较长台词的自动换行效果', 14);
+  assert.equal(rows.length, 3); assert.ok(Math.max(...rows.map(r => r.length)) - Math.min(...rows.map(r => r.length)) <= 1, '各行字数平均：' + rows.join('|'));
+  assert.deepEqual(app.wrapLine('让我进去，我有话要说。', 14), ['让我进去，我有话要说。']);
+  assert.deepEqual(app.wrapLine('   ', 14), []);
+  // mvhd：版本 0，timescale 1000，duration 4096
+  const mvhd = Buffer.alloc(32); mvhd.write('mvhd', 4); mvhd.writeUInt32BE(1000, 20); mvhd.writeUInt32BE(4096, 24);
+  assert.equal(app.mp4Duration(mvhd.subarray(0)), 4.096);
+  const clips = [{ dur: 3, audio: true, subFiles: ['/tmp/a b/sub0-0.txt', '/tmp/a b/sub0-1.txt'] }, { dur: 4, audio: false, subFiles: [] }, { dur: 2, audio: true, subFiles: ["C:\\x\\it's.txt"] }];
   const { filter, total } = app.buildConcatFilter(clips, [720, 1280], 'C:/Windows/Fonts/msyh.ttc');
   assert.equal(total, 9);
   assert.match(filter, /\[0:a\]aresample.*apad=whole_dur=3\[a0\]/, '有声音的镜头保留声音');
@@ -262,9 +267,10 @@ test('合成成片：判断音轨、字幕换行、ffmpeg 滤镜', () => {
   assert.match(filter, /\[v0\]\[a0\]\[v1\]\[a1\]\[v2\]\[a2\]concat=n=3:v=1:a=1\[vc\]\[ac\]/);
   assert.match(filter, /fontfile='C\\:\/Windows\/Fonts\/msyh.ttc'/, 'Windows 盘符的冒号要转义');
   assert.match(filter, /textfile='C\\:\/x\/it\\'s.txt'/, '反斜杠换成 /，单引号转义');
+  assert.match(filter, /sub0-0.txt'.*:y=1065:.*sub0-1.txt'.*:y=1115:/, '两行字幕各自居中，上下排列');
   assert.match(filter, /enable='between\(t,0.00,2.95\)'/, '第一句字幕在 0~3 秒');
   assert.match(filter, /enable='between\(t,7.00,8.95\)'/, '第三句字幕从 7 秒开始');
-  assert.equal((filter.match(/drawtext=/g) || []).length, 2, '没有台词的镜头不加字幕');
+  assert.equal((filter.match(/drawtext=/g) || []).length, 3, '每行一个 drawtext，没有台词的镜头不加');
   assert.match(app.buildConcatFilter(clips, [720, 1280], null).filter, /\[vc\]null\[v\]$/, '没有字体时不加字幕');
 });
 

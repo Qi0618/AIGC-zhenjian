@@ -344,6 +344,13 @@ export function hasAudioTrack(buf) {
   for (let i = buf.indexOf('hdlr'); i !== -1; i = buf.indexOf('hdlr', i + 4)) if (buf.toString('latin1', i + 12, i + 16) === 'soun') return true;
   return false;
 }
+// 读 mp4 的实际时长（秒）：mvhd 盒子里的 timescale 和 duration
+export function mp4Duration(buf) {
+  const i = buf.indexOf('mvhd'); if (i < 0) return 0;
+  const v = buf[i + 4];
+  const [scale, dur] = v === 1 ? [buf.readUInt32BE(i + 24), Number(buf.readBigUInt64BE(i + 28))] : [buf.readUInt32BE(i + 16), buf.readUInt32BE(i + 20)];
+  return scale ? dur / scale : 0;
+}
 // 字幕用系统自带的中文字体；可以用 SUBTITLE_FONT 指定
 const FONT_CANDIDATES = {
   darwin: ['/System/Library/Fonts/PingFang.ttc', '/System/Library/Fonts/STHeiti Medium.ttc', '/System/Library/Fonts/Hiragino Sans GB.ttc', '/Library/Fonts/Arial Unicode.ttf'],
@@ -354,17 +361,18 @@ export function findSubtitleFont() {
   const list = [process.env.SUBTITLE_FONT, ...(FONT_CANDIDATES[process.platform] || FONT_CANDIDATES.linux)].filter(Boolean);
   return list.find(f => fs.existsSync(f)) || null;
 }
-// 一行最多多少个字：竖屏窄一些
+// 按每行最多 max 个字分行，各行字数尽量平均（避免最后一行只剩一个字），最多 3 行
 export function wrapLine(text, max) {
-  const t = String(text || '').replace(/\s+/g, ' ').trim(), out = [];
-  for (let i = 0; i < t.length; i += max) out.push(t.slice(i, i + max));
-  return out.slice(0, 3).join('\n');
+  const t = String(text || '').replace(/\s+/g, ' ').trim(); if (!t) return [];
+  const n = Math.min(3, Math.ceil(t.length / max)), per = Math.ceil(t.length / n), out = [];
+  for (let i = 0; i < t.length && out.length < 3; i += per) out.push(t.slice(i, i + per));
+  return out;
 }
 // filter 参数里的路径：统一用 / ，冒号和单引号要转义（Windows 的 C: 也要）
 const ffPath = f => String(f).replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
 /**
  * 生成 ffmpeg 的 filter_complex。
- * clips: [{ dur, audio, subFile }]，size: [W, H]，font: 字体文件或 null
+ * clips: [{ dur, audio, subFiles: [每行一个文本文件] }]，size: [W, H]，font: 字体文件或 null
  */
 export function buildConcatFilter(clips, [W, H], font) {
   const parts = [], labels = [];
@@ -381,10 +389,14 @@ export function buildConcatFilter(clips, [W, H], font) {
     c.start = t; c.end = t + d; t += d;
   });
   parts.push(`${labels.join('')}concat=n=${clips.length}:v=1:a=1[vc][ac]`);
-  const subs = font ? clips.filter(c => c.subFile) : [];
+  const subs = font ? clips.filter(c => c.subFiles && c.subFiles.length) : [];
   if (subs.length) {
-    const fs_ = Math.round(Math.min(W, H) * 0.052);
-    const draw = subs.map(c => `drawtext=fontfile='${ffPath(font)}':textfile='${ffPath(c.subFile)}':fontsize=${fs_}:fontcolor=white:borderw=${Math.max(2, Math.round(fs_ / 12))}:bordercolor=black@0.85:line_spacing=${Math.round(fs_ * 0.3)}:x=(w-text_w)/2:y=h-text_h-h*0.09:enable='between(t,${c.start.toFixed(2)},${(c.end - 0.05).toFixed(2)})'`);
+    // 每行单独画一次，各自水平居中；最后一行离底部 9%
+    const fs_ = Math.round(Math.min(W, H) * 0.052), lh = Math.round(fs_ * 1.35), bottom = Math.round(H * 0.09);
+    const draw = subs.flatMap(c => c.subFiles.map((f, j) => {
+      const y = H - bottom - (c.subFiles.length - j) * lh;
+      return `drawtext=fontfile='${ffPath(font)}':textfile='${ffPath(f)}':fontsize=${fs_}:fontcolor=white:borderw=${Math.max(2, Math.round(fs_ / 12))}:bordercolor=black@0.85:x=(w-text_w)/2:y=${y}:enable='between(t,${c.start.toFixed(2)},${(c.end - 0.05).toFixed(2)})'`;
+    }));
     parts.push(`[vc]${draw.join(',')}[v]`);
   } else parts.push('[vc]null[v]');
   return { filter: parts.join(';'), total: t };
@@ -400,10 +412,12 @@ async function concatVideos({ urls, durs, lines, ratio = '9:16', subtitles = tru
     if (subtitles && !font) console.warn('没有找到中文字体，成片不带字幕；可以用 SUBTITLE_FONT 指定字体文件');
     const clips = [];
     for (let i = 0; i < files.length; i++) {
-      const head = await fsp.readFile(files[i]);
-      const c = { dur: +durs?.[i] || 3, audio: hasAudioTrack(head) };
-      const text = wrapLine(lines?.[i], size[0] < size[1] ? 14 : 22);
-      if (font && text) { c.subFile = path.join(tmp, `sub${i}.txt`); await fsp.writeFile(c.subFile, text); }
+      const head = await fsp.readFile(files[i]), audio = hasAudioTrack(head), real = mp4Duration(head);
+      // 有配音的镜头保留完整长度：视频模型最短出 4 秒，台词可能说到最后，按分镜时长裁会把话切掉
+      const want = +durs?.[i] || 3, c = { dur: audio && real > want ? Math.min(real, want + 8) : want, audio };
+      const rows = font ? wrapLine(lines?.[i], size[0] < size[1] ? 14 : 22) : [];
+      c.subFiles = [];
+      for (let j = 0; j < rows.length; j++) { const f = path.join(tmp, `sub${i}-${j}.txt`); await fsp.writeFile(f, rows[j]); c.subFiles.push(f); }
       clips.push(c);
     }
     const { filter } = buildConcatFilter(clips, size, font);
@@ -417,7 +431,7 @@ async function concatVideos({ urls, durs, lines, ratio = '9:16', subtitles = tru
       p.on('exit', c => (c === 0 ? ok() : bad(new HttpError(500, '合成失败（ffmpeg 退出码 ' + c + '）'))));
       p.on('error', bad);
     }).catch(e => { console.error('ffmpeg 出错：', err); throw e; });
-    return { url: '/files/' + path.basename(out), subtitles: !!(font && clips.some(c => c.subFile)) };
+    return { url: '/files/' + path.basename(out), subtitles: !!(font && clips.some(c => c.subFiles.length)), duration: clips.reduce((a, c) => a + c.dur, 0) };
   } finally { await fsp.rm(tmp, { recursive: true, force: true }); }
 }
 
