@@ -213,7 +213,9 @@ textarea{resize:vertical;min-height:72px;line-height:1.6}
 .shop{display:grid;grid-template-columns:380px minmax(0,1fr);gap:20px;align-items:start}
 .config{display:flex;flex-direction:column;overflow:hidden;position:sticky;top:76px;max-height:calc(100vh - 92px);overflow-y:auto;scrollbar-width:thin}
 .csec{padding:18px 20px;display:flex;flex-direction:column;gap:16px;border-bottom:1px solid var(--line)}
-.csec:last-child{border-bottom:0;position:sticky;bottom:0}
+.config>.csec{flex-shrink:0}
+/* 「生成」按钮这一行贴在配置栏底部，配置较长时也一直可见；不透明背景，避免和滚过的内容叠在一起 */
+.config>.gen-row{position:sticky;bottom:0;z-index:2;margin-top:auto;padding:14px 20px 18px;background:var(--panel);box-shadow:0 -1px 0 var(--line);border-radius:0 0 var(--r) var(--r)}
 .csec-h{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .csec-h h3,.bsec h3{font-size:15px;margin:0;font-weight:700;letter-spacing:-.005em}
 .csec-h h3 span{color:var(--faint);font-weight:400;margin-left:6px;font-size:12px}
@@ -429,7 +431,7 @@ textarea{resize:vertical;min-height:72px;line-height:1.6}
 .modal-box .mono{color:#E4E4E8;font-size:12px}
 .toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--cta);color:var(--cta-ink);padding:10px 18px;border-radius:999px;font-size:13px;font-weight:500;z-index:60;box-shadow:var(--shadow-lg);max-width:calc(100vw - 32px)}
 
-@media (max-width:1180px){.shop{grid-template-columns:1fr}.config{position:static;max-height:none}.csec:last-child{position:static}.studio{grid-template-columns:1fr}.player{position:static}.entries{grid-template-columns:1fr}}
+@media (max-width:1180px){.shop{grid-template-columns:1fr}.config{position:static;max-height:none}.config>.gen-row{border-radius:0}.studio{grid-template-columns:1fr}.player{position:static}.entries{grid-template-columns:1fr}}
 @media (max-width:1180px) and (min-width:861px){.app{grid-template-columns:200px minmax(0,1fr)}}
 @media (max-width:860px){
   .app{display:flex;flex-direction:column}
