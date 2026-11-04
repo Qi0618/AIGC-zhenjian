@@ -6,7 +6,7 @@
 <title>帧间 Zhenjian</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500&display=swap">
-<link rel="stylesheet" href="styles.css?v=1.0.1">
+<link rel="stylesheet" href="styles.css?v=1.1.0">
 </head>
 <body>
 <div class="app">
@@ -164,7 +164,7 @@
           </div>
         </div>
         <div class="bsec">
-          <div class="csec-h"><h3>角色卡</h3><span class="hint">参考图和主色会带进每个镜头，保证同一角色前后一致</span></div>
+          <div class="csec-h"><h3>角色卡</h3><span class="hint">每个角色的定妆照会作为每个镜头的参考，保证同一角色前后长得一样</span><button type="button" class="btn sm" id="genPortraits" hidden>生成全部定妆照</button></div>
           <div class="cast" id="cast"></div>
         </div>
         <div class="brief-foot"><span class="hint">切换题材会填入对应示例；修改过内容后不再覆盖。</span><button class="btn primary" id="toScript">生成分镜脚本</button></div>
@@ -193,7 +193,7 @@
       <div id="d4" class="studio" hidden>
         <div class="studio-left">
           <div class="panel vset">
-            <div class="field"><label class="label" for="vVoice">配音</label><select id="vVoice"><option>AI 配音 + 字幕</option><option>仅字幕</option><option>无</option></select></div>
+            <div class="field"><label class="label" for="vVoice">配音</label><select id="vVoice"><option>AI 配音 + 字幕</option><option>仅字幕</option><option>无</option></select><span class="hint" style="margin-top:6px">配音和视频一起生成，口型会对上台词。修改这一项后，需要重新生成视频才会生效。</span></div>
             <span class="hint" id="vHint"></span>
             <button class="btn" id="exportVideo" disabled>导出成片</button>
             <button class="btn primary" id="genVideo">生成视频</button>
@@ -273,6 +273,6 @@
 </div>
 <div class="toast" id="toast" hidden></div>
 <div class="gate" id="gate" hidden><form class="panel" id="gateForm"><h3 style="margin:0">输入访问口令</h3><span class="hint">这台服务器设置了访问口令，请向管理员获取。</span><input id="gateIn" type="password" autocomplete="current-password" placeholder="访问口令" aria-label="访问口令"><button class="btn primary" type="submit">进入</button></form></div>
-<script src="app.js?v=1.0.1"></script>
+<script src="app.js?v=1.1.0"></script>
 </body>
 </html>

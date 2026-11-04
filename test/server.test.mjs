@@ -248,6 +248,26 @@ test('模型平台的报错翻成中文，不暴露模型 ID 和账号', () => {
   assert.equal(f('something else'), '视频服务返回错误：something else');
 });
 
+test('合成成片：判断音轨、字幕换行、ffmpeg 滤镜', () => {
+  const box = t => Buffer.concat([Buffer.from('....hdlr'), Buffer.alloc(8), Buffer.from(t)]);
+  assert.equal(app.hasAudioTrack(Buffer.concat([box('vide'), box('soun')])), true);
+  assert.equal(app.hasAudioTrack(box('vide')), false);
+  assert.equal(app.wrapLine('让我进去，我有话要说。这台机器，是我三年前做的。', 14), '让我进去，我有话要说。这台机\n器，是我三年前做的。');
+  assert.equal(app.wrapLine('   ', 14), '');
+  const clips = [{ dur: 3, audio: true, subFile: '/tmp/a b/sub0.txt' }, { dur: 4, audio: false }, { dur: 2, audio: true, subFile: "C:\\x\\it's.txt" }];
+  const { filter, total } = app.buildConcatFilter(clips, [720, 1280], 'C:/Windows/Fonts/msyh.ttc');
+  assert.equal(total, 9);
+  assert.match(filter, /\[0:a\]aresample.*apad=whole_dur=3\[a0\]/, '有声音的镜头保留声音');
+  assert.match(filter, /anullsrc=r=44100:cl=stereo,atrim=duration=4\[a1\]/, '没声音的镜头补静音');
+  assert.match(filter, /\[v0\]\[a0\]\[v1\]\[a1\]\[v2\]\[a2\]concat=n=3:v=1:a=1\[vc\]\[ac\]/);
+  assert.match(filter, /fontfile='C\\:\/Windows\/Fonts\/msyh.ttc'/, 'Windows 盘符的冒号要转义');
+  assert.match(filter, /textfile='C\\:\/x\/it\\'s.txt'/, '反斜杠换成 /，单引号转义');
+  assert.match(filter, /enable='between\(t,0.00,2.95\)'/, '第一句字幕在 0~3 秒');
+  assert.match(filter, /enable='between\(t,7.00,8.95\)'/, '第三句字幕从 7 秒开始');
+  assert.equal((filter.match(/drawtext=/g) || []).length, 2, '没有台词的镜头不加字幕');
+  assert.match(app.buildConcatFilter(clips, [720, 1280], null).filter, /\[vc\]null\[v\]$/, '没有字体时不加字幕');
+});
+
 test('请求来源检查：挡住跨站请求和 DNS 重绑定', () => {
   const opt = { token: '', bindHost: '127.0.0.1' };
   assert.equal(app.checkRequest({ method: 'POST', contentType: 'text/plain', host: 'localhost:8787' }, opt)[0], 415);

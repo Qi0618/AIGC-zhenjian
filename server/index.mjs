@@ -274,7 +274,8 @@ const TASK_TTL = 7 * 24 * 3600 * 1000;
 try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(tasksFile, 'utf8')))) if (Date.now() - (v.at || 0) < TASK_TTL) TASKS.set(k, v); } catch {}
 const saveTasks = () => fsp.writeFile(tasksFile, JSON.stringify(Object.fromEntries(TASKS))).catch(() => {});
 
-async function createVideo({ provider = 'seedance', image, prompt = '', duration = 5, ratio = '9:16' }) {
+// audio=true 时让视频模型同时生成声音（台词配音、口型、环境音），不需要另外接语音合成
+async function createVideo({ provider = 'seedance', image, prompt = '', duration = 5, ratio = '9:16', audio = false }) {
   const img = await toDataUri(image); if (!img) throw new HttpError(400, '缺少首帧图（已确认的关键帧）');
   let upstreamId;
   if (provider === 'kling') {
@@ -293,12 +294,12 @@ async function createVideo({ provider = 'seedance', image, prompt = '', duration
     const j = await upstream(CFG.arkBase + '/contents/generations/tasks', {
       method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.arkKey },
       // 首帧图已经是目标比例，ratio 用 adaptive 跟随首帧
-      body: JSON.stringify({ model: CFG.seedanceModel, content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: img }, role: 'first_frame' }], resolution: CFG.seedanceRes, ratio: 'adaptive', duration: dur, watermark: false, generate_audio: false }),
+      body: JSON.stringify({ model: CFG.seedanceModel, content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: img }, role: 'first_frame' }], resolution: CFG.seedanceRes, ratio: 'adaptive', duration: dur, watermark: false, generate_audio: !!audio }),
     }, '视频服务');
     upstreamId = j.id;
   }
   if (!upstreamId) throw new HttpError(502, '视频接口没有返回任务 id');
-  const id = newId(); TASKS.set(id, { provider, upstreamId, at: Date.now() }); saveTasks();
+  const id = newId(); TASKS.set(id, { provider, upstreamId, at: Date.now(), audio: !!audio && provider !== 'kling' }); saveTasks();
   return { id };
 }
 // 视频生成好以后在后台下载到本机：网速慢时一段视频要下好几分钟，查询进度不必一直挂着等；同一个任务只下载一次
@@ -337,21 +338,87 @@ async function queryUpstreamVideo(t) {
   return { status, remote, error };
 }
 
-/* ---------------- 合成成片：把各镜头 mp4 拼成一条 ---------------- */
-async function concatVideos({ urls, durs }) {
-  if (!HAS_FFMPEG) throw new HttpError(501, '服务器没有安装 ffmpeg，无法合成，请逐个下载镜头');
-  const files = (urls || []).map(u => path.join(FILES, path.basename(String(u))));
-  if (!files.length || files.some(f => !fs.existsSync(f))) throw new HttpError(400, '有镜头视频已不存在');
-  const out = path.join(FILES, newId() + '.mp4');
-  // 不同模型的分辨率可能不同，统一缩放后重新编码，保证能拼接
-  const inputs = files.flatMap(f => ['-i', f]);
-  const filt = files.map((_, i) => `[${i}:v]${+durs?.[i] > 0 ? `trim=duration=${+durs[i]},setpts=PTS-STARTPTS,` : ''}scale=720:-2:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2,setsar=1,fps=24[v${i}]`).join(';')
-    + ';' + files.map((_, i) => `[v${i}]`).join('') + `concat=n=${files.length}:v=1:a=0[v]`;
-  await new Promise((ok, bad) => {
-    const p = spawn(FFMPEG, ['-y', ...inputs, '-filter_complex', filt, '-map', '[v]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', out], { stdio: 'ignore' });
-    p.on('exit', c => (c === 0 ? ok() : bad(new HttpError(500, '合成失败（ffmpeg 退出码 ' + c + '）')))); p.on('error', bad);
+/* ---------------- 合成成片：镜头 + 声音拼成一条，烧录字幕 ---------------- */
+// 不用 ffprobe 也能判断 mp4 有没有音轨：找 hdlr 盒子里的 soun 类型
+export function hasAudioTrack(buf) {
+  for (let i = buf.indexOf('hdlr'); i !== -1; i = buf.indexOf('hdlr', i + 4)) if (buf.toString('latin1', i + 12, i + 16) === 'soun') return true;
+  return false;
+}
+// 字幕用系统自带的中文字体；可以用 SUBTITLE_FONT 指定
+const FONT_CANDIDATES = {
+  darwin: ['/System/Library/Fonts/PingFang.ttc', '/System/Library/Fonts/STHeiti Medium.ttc', '/System/Library/Fonts/Hiragino Sans GB.ttc', '/Library/Fonts/Arial Unicode.ttf'],
+  win32: ['C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/msyh.ttf', 'C:/Windows/Fonts/simhei.ttf', 'C:/Windows/Fonts/simsun.ttc'],
+  linux: ['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc', '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc', '/usr/share/fonts/wqy-microhei/wqy-microhei.ttc'],
+};
+export function findSubtitleFont() {
+  const list = [process.env.SUBTITLE_FONT, ...(FONT_CANDIDATES[process.platform] || FONT_CANDIDATES.linux)].filter(Boolean);
+  return list.find(f => fs.existsSync(f)) || null;
+}
+// 一行最多多少个字：竖屏窄一些
+export function wrapLine(text, max) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim(), out = [];
+  for (let i = 0; i < t.length; i += max) out.push(t.slice(i, i + max));
+  return out.slice(0, 3).join('\n');
+}
+// filter 参数里的路径：统一用 / ，冒号和单引号要转义（Windows 的 C: 也要）
+const ffPath = f => String(f).replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+/**
+ * 生成 ffmpeg 的 filter_complex。
+ * clips: [{ dur, audio, subFile }]，size: [W, H]，font: 字体文件或 null
+ */
+export function buildConcatFilter(clips, [W, H], font) {
+  const parts = [], labels = [];
+  let t = 0;
+  clips.forEach((c, i) => {
+    const d = Math.max(0.5, +c.dur || 3);
+    // 视频：比设定时长短就停在最后一帧补齐，再裁到设定时长；统一尺寸和帧率
+    parts.push(`[${i}:v]tpad=stop_mode=clone:stop_duration=${d},trim=duration=${d},setpts=PTS-STARTPTS,scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p[v${i}]`);
+    // 声音：有就裁到同样长度，不够补静音；没有音轨就生成一段静音，保证音画对齐
+    parts.push(c.audio
+      ? `[${i}:a]aresample=44100,aformat=channel_layouts=stereo,atrim=duration=${d},asetpts=PTS-STARTPTS,apad=whole_dur=${d}[a${i}]`
+      : `anullsrc=r=44100:cl=stereo,atrim=duration=${d}[a${i}]`);
+    labels.push(`[v${i}][a${i}]`);
+    c.start = t; c.end = t + d; t += d;
   });
-  return { url: '/files/' + path.basename(out) };
+  parts.push(`${labels.join('')}concat=n=${clips.length}:v=1:a=1[vc][ac]`);
+  const subs = font ? clips.filter(c => c.subFile) : [];
+  if (subs.length) {
+    const fs_ = Math.round(Math.min(W, H) * 0.052);
+    const draw = subs.map(c => `drawtext=fontfile='${ffPath(font)}':textfile='${ffPath(c.subFile)}':fontsize=${fs_}:fontcolor=white:borderw=${Math.max(2, Math.round(fs_ / 12))}:bordercolor=black@0.85:line_spacing=${Math.round(fs_ * 0.3)}:x=(w-text_w)/2:y=h-text_h-h*0.09:enable='between(t,${c.start.toFixed(2)},${(c.end - 0.05).toFixed(2)})'`);
+    parts.push(`[vc]${draw.join(',')}[v]`);
+  } else parts.push('[vc]null[v]');
+  return { filter: parts.join(';'), total: t };
+}
+async function concatVideos({ urls, durs, lines, ratio = '9:16', subtitles = true }) {
+  if (!HAS_FFMPEG) throw new HttpError(501, '没有找到 ffmpeg，无法合成成片，改为逐个下载镜头');
+  const files = (urls || []).map(u => path.join(FILES, path.basename(String(u))));
+  if (!files.length || files.length > 60 || files.some(f => !fs.existsSync(f))) throw new HttpError(400, '有镜头视频已不存在');
+  const size = ratio === '16:9' ? [1280, 720] : [720, 1280];
+  const tmp = await fsp.mkdtemp(path.join(CFG.dataDir, 'tmp-'));
+  try {
+    const font = subtitles ? findSubtitleFont() : null;
+    if (subtitles && !font) console.warn('没有找到中文字体，成片不带字幕；可以用 SUBTITLE_FONT 指定字体文件');
+    const clips = [];
+    for (let i = 0; i < files.length; i++) {
+      const head = await fsp.readFile(files[i]);
+      const c = { dur: +durs?.[i] || 3, audio: hasAudioTrack(head) };
+      const text = wrapLine(lines?.[i], size[0] < size[1] ? 14 : 22);
+      if (font && text) { c.subFile = path.join(tmp, `sub${i}.txt`); await fsp.writeFile(c.subFile, text); }
+      clips.push(c);
+    }
+    const { filter } = buildConcatFilter(clips, size, font);
+    const out = path.join(FILES, newId() + '.mp4');
+    const args = ['-y', '-hide_banner', '-loglevel', 'error', ...files.flatMap(f => ['-i', f]), '-filter_complex', filter, '-map', '[v]', '-map', '[ac]',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', out];
+    let err = '';
+    await new Promise((ok, bad) => {
+      const p = spawn(FFMPEG, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      p.stderr.on('data', d => { err = (err + d).slice(-2000); });
+      p.on('exit', c => (c === 0 ? ok() : bad(new HttpError(500, '合成失败（ffmpeg 退出码 ' + c + '）'))));
+      p.on('error', bad);
+    }).catch(e => { console.error('ffmpeg 出错：', err); throw e; });
+    return { url: '/files/' + path.basename(out), subtitles: !!(font && clips.some(c => c.subFile)) };
+  } finally { await fsp.rm(tmp, { recursive: true, force: true }); }
 }
 
 /* ---------------- 设置：在网页里填写 / 测试密钥 ---------------- */

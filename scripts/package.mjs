@@ -20,10 +20,30 @@ const CACHE = path.join(ROOT, '.cache', 'node'), DIST = path.join(ROOT, 'dist');
 const APP_FILES = ['index.html', 'styles.css', 'app.js', 'package.json', 'README.md', 'server/index.mjs'];
 
 const TARGETS = {
-  'mac-arm64': { archive: `node-${NODE_VER}-darwin-arm64.tar.gz`, os: 'mac' },
-  'mac-x64': { archive: `node-${NODE_VER}-darwin-x64.tar.gz`, os: 'mac' },
-  'win-x64': { archive: `node-${NODE_VER}-win-x64.zip`, os: 'win' },
+  'mac-arm64': { archive: `node-${NODE_VER}-darwin-arm64.tar.gz`, os: 'mac', ffmpeg: 'ffmpeg-darwin-arm64' },
+  'mac-x64': { archive: `node-${NODE_VER}-darwin-x64.tar.gz`, os: 'mac', ffmpeg: 'ffmpeg-darwin-x64' },
+  'win-x64': { archive: `node-${NODE_VER}-win-x64.zip`, os: 'win', ffmpeg: 'ffmpeg-win32-x64' },
 };
+
+// ffmpeg 用 ffmpeg-static 项目的预编译版（GPL），从 npmmirror 下载。下载源没有提供校验文件，
+// 所以把第一次下载核对过的 SHA256 固定在这里，之后每次下载都必须一致，防止文件被替换
+const FFMPEG_VER = 'b6.1.1';
+const FFMPEG_BASE = process.env.FFMPEG_MIRROR || `https://cdn.npmmirror.com/binaries/ffmpeg-static/${FFMPEG_VER}`;
+const FFMPEG_SHA256 = {
+  // 'ffmpeg-darwin-arm64.gz': '…',
+};
+const WITH_FFMPEG = !process.argv.includes('--no-ffmpeg');
+
+async function fetchFfmpeg(name) {
+  const dir = path.join(ROOT, '.cache', 'ffmpeg'); await fsp.mkdir(dir, { recursive: true });
+  const gz = path.join(dir, name + '.gz'), want = FFMPEG_SHA256[name + '.gz'];
+  if (!fs.existsSync(gz) || (want && sha256(gz) !== want)) { console.log(`  下载 ${name}.gz（${FFMPEG_BASE}）…`); await download(`${FFMPEG_BASE}/${name}.gz`, gz); }
+  const got = sha256(gz);
+  if (!want) throw new Error(`${name}.gz 还没有固定校验值（这次下载的是 ${got}）。人工核对无误后写进 scripts/package.mjs 的 FFMPEG_SHA256，或用 --no-ffmpeg 打不带 ffmpeg 的包`);
+  if (got !== want) { fs.rmSync(gz); throw new Error(name + '.gz 校验失败'); }
+  for (const ext of ['LICENSE', 'README']) { const f = path.join(dir, `${name}.${ext}`); if (!fs.existsSync(f)) await download(`${FFMPEG_BASE}/${name}.${ext}`, f); }
+  return { bin: zlib.gunzipSync(fs.readFileSync(gz)), license: path.join(dir, name + '.LICENSE'), readme: path.join(dir, name + '.README') };
+}
 
 /* ---- 生成 zip：文件名标记为 UTF-8（Windows 解压中文不乱码），并保留可执行权限 ---- */
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
@@ -101,6 +121,11 @@ DIR="$(pwd)"
 export DATA_DIR="$DIR/data"
 export OPEN_BROWSER="\${OPEN_BROWSER:-1}"
 export UPSTREAM_TIMEOUT_MS="\${UPSTREAM_TIMEOUT_MS:-600000}"
+# 自带的 ffmpeg 用来合成成片；它没有经过苹果公证，解除「来自互联网」标记，否则 macOS 会拦截运行
+if [ -f "$DIR/runtime/ffmpeg" ]; then
+  xattr -d com.apple.quarantine "$DIR/runtime/ffmpeg" 2>/dev/null
+  export FFMPEG_PATH="$DIR/runtime/ffmpeg"
+fi
 echo "帧间 Zhenjian ${VERSION}"
 echo
 exec "$DIR/runtime/node" "$DIR/app/server/index.mjs"
@@ -114,6 +139,7 @@ const WIN_LAUNCHER = [
   'set "DATA_DIR=%~dp0data"',
   'if not defined OPEN_BROWSER set OPEN_BROWSER=1',
   'if not defined UPSTREAM_TIMEOUT_MS set UPSTREAM_TIMEOUT_MS=600000',
+  'if exist "%~dp0runtime\\ffmpeg.exe" set "FFMPEG_PATH=%~dp0runtime\\ffmpeg.exe"',
   `echo 帧间 Zhenjian ${VERSION}`,
   'echo 使用期间不要关闭这个窗口，关闭窗口即退出帧间。',
   'echo.',
@@ -156,10 +182,11 @@ ${start}
 【常见问题】
 · 生成很慢或超时：生图通常 20 秒到 1 分钟，视频要几分钟。网络较慢时请耐心等待。
 · 提示「还没有配置」：到左侧「设置」里填写对应的密钥。
-· 导出短剧成片：需要电脑上安装了 ffmpeg；没有安装时会改为逐个下载每个镜头的视频。
+· 导出短剧成片：会把所有镜头、配音和字幕合成一个 MP4。字幕使用系统自带的中文字体。
 · 安全：帧间只允许本机访问，同一网络里的其他设备打不开。
 
-本软件附带 Node.js 运行环境（runtime 文件夹），其许可证见 runtime/NODE_LICENSE。
+本软件附带 Node.js 运行环境和 ffmpeg（runtime 文件夹），许可证见 runtime/NODE_LICENSE、runtime/FFMPEG_LICENSE.txt。
+ffmpeg 以 GPL 许可证分发，源码获取方式见 runtime/FFMPEG_README.txt。
 `;
   return os === 'win' ? text.replace(/\n/g, '\r\n') : text;
 }
@@ -191,6 +218,12 @@ async function build(id) {
     await fsp.writeFile(path.join(out, '启动帧间.bat'), WIN_LAUNCHER);
   }
   await fsp.rename(path.join(tmp, inner, 'LICENSE'), path.join(out, 'runtime', 'NODE_LICENSE'));
+  if (WITH_FFMPEG) {
+    const ff = await fetchFfmpeg(t.ffmpeg), exe = path.join(out, 'runtime', t.os === 'win' ? 'ffmpeg.exe' : 'ffmpeg');
+    await fsp.writeFile(exe, ff.bin, { mode: 0o755 });
+    await fsp.copyFile(ff.license, path.join(out, 'runtime', 'FFMPEG_LICENSE.txt'));
+    await fsp.copyFile(ff.readme, path.join(out, 'runtime', 'FFMPEG_README.txt'));
+  }
   await fsp.rm(tmp, { recursive: true, force: true });
   await fsp.writeFile(path.join(out, '使用说明.txt'), readme(t.os));
 
@@ -202,6 +235,7 @@ async function build(id) {
   return zip;
 }
 
-const want = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(TARGETS);
+const args = process.argv.slice(2).filter(a => !a.startsWith('--'));
+const want = args.length ? args : Object.keys(TARGETS);
 for (const id of want) await build(id);
 console.log('\n全部完成，压缩包在 dist/ 文件夹里。');

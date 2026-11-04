@@ -108,8 +108,9 @@ const API={
     let p=0;const tm=setInterval(()=>{p=Math.min(.92,p+.035);onProgress&&onProgress(p)},700);
     try{
       const refs=[];if(req.region)refs.push(await frameData(s));
-      for(const ch of (s.cast||[]).map(charById).filter(Boolean)){const d=await charRef(ch).catch(()=>null);if(d)refs.push(d)}
-      const roleNote=refs.length>(req.region?1:0)?'\n出镜角色的定妆照已作为参考图提供，人物长相、发型和服装必须与参考图一致。':'';
+      const names=[];
+      for(const ch of (s.cast||[]).map(charById).filter(Boolean)){const d=await charRef(ch).catch(()=>null);if(d){refs.push(d);names.push(ch.name)}}
+      const roleNote=names.length?`\n参考图${req.region?'从第二张起':''}依次是${names.map(n=>'「'+n+'」').join('、')}的定妆照，画面中这些人物的长相、发型和服装必须与各自的参考图保持一致。`:'';
       const prompt=req.region
         ?`参考图第一张是当前关键帧。保持整体构图、人物、光线和画风不变，只修改${areaText(req.region)}：${req.note||'重新绘制这一块，让它更自然'}。${roleNote}`
         :`${req.prompt}${roleNote}\n电影级画面，${wide?'横屏':'竖屏'}短剧关键帧，构图完整，画面中不要出现字幕、文字和水印。`;
@@ -122,8 +123,9 @@ const API={
     if(!LIVE.on)return mockProgress(1000+s.dur*260,onProgress).then(()=>({ok:true}));
     try{
       const image=!s.kfUrl||(s.patches||[]).some(x=>x.url)?await frameData(s):s.kfUrl;
-      const prompt=`${s.desc}${s.cam&&s.cam!=='固定'?CAM_TXT[s.cam]+'。':'镜头固定。'}${s.line?`人物说：“${s.line}”。`:''}画面风格与首帧一致，人物动作自然流畅。`;
-      const {id}=await api('/api/video',{provider:model,image,prompt,duration:s.dur,ratio:dr().ratio});
+      const audio=wantsAudio()&&model!=='kling',prompt=videoPrompt(s,audio);
+      const {id}=await api('/api/video',{provider:model,image,prompt,duration:s.dur,ratio:dr().ratio,audio});
+      s.vAudio=audio;
       s.vTask=id;s.vAt=Date.now();onTask&&onTask();
       return await API.pollVideo(id,model,onProgress,s.vAt);
     }catch(e){return{error:e.message}}
@@ -141,11 +143,28 @@ const API={
 };
 function slimStory(story){return{...story,chars:story.chars.map(c=>({name:c.name,role:c.role,look:c.look}))}}
 function shotEnums(){return{scales:SCALES,moods:Object.keys(MOODS),moodNames:MOOD_NAME,cams:CAMS}}
+/* 视频提示词：带声音时写清是谁在说话，让配音和口型对得上 */
+const wantsAudio=()=>/配音/.test(dr().voice||'');
+function speakerLine(s){
+  const line=(s.line||'').trim();if(!line)return null;
+  const m=line.match(/^([^：:]{1,8})[：:]\s*(.+)$/);
+  if(m&&/旁白|画外音/.test(m[1]))return{who:null,text:m[2]};
+  if(m&&dr().chars.some(c=>c.name===m[1]))return{who:m[1],text:m[2]};
+  const first=(s.cast||[]).map(charById).filter(Boolean)[0];
+  return{who:first?first.name:null,text:m&&m[1].length<=4?m[2]:line};
+}
+function videoPrompt(s,audio){
+  const cam=s.cam&&s.cam!=='固定'?CAM_TXT[s.cam]+'。':'镜头固定。',sp=speakerLine(s);
+  let say='';
+  if(sp)say=audio?(sp.who?`${sp.who}开口说话，台词：“${sp.text}”，中文普通话，口型与台词一致。`:`画外音旁白：“${sp.text}”，中文普通话，语气沉稳。`)
+    :`${sp.who||'人物'}说：“${sp.text}”。`;
+  return `${s.desc}${cam}${say}${audio?'配合画面的环境音效，不要背景音乐。':''}画面风格与首帧一致，人物动作自然流畅。`;
+}
 function mockProgress(ms,cb){return new Promise(res=>{const t0=performance.now();const tick=()=>{const p=Math.min(1,(performance.now()-t0)/ms);cb&&cb(p);if(p>=1)res();else setTimeout(tick,110)};tick()})}
 
 /* 价格（单位：积分，1 积分 = 0.1 元）。按模型成本约 2 倍定价：
    Seedream 4.0 0.2 元/张 · DeepSeek V4.1 Flash 每次分镜不到 0.01 元 · Seedance 2.0 mini 720p 0.5 元/秒（最短 4 秒） · 可灵 2.5 Turbo 1080p 约 2.5 元/5 秒 */
-const PRICING={image:4,storyboard:2,rewrite:1,keyframe:4,inpaint:4,seedancePerSec:10,klingPer5s:50};
+const PRICING={image:4,storyboard:2,rewrite:1,portrait:4,keyframe:4,inpaint:4,seedancePerSec:10,klingPer5s:50};
 function refund(p,n){if(n<=0)return;APP.credits+=n;p.spent=Math.max(0,(p.spent||0)-n);Store.saveWallet().catch(()=>{});renderWallet()}
 function saveUrl(url,name){const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove()}
 function showGate(){$('#gate').hidden=false;setTimeout(()=>$('#gateIn').focus(),50)}
@@ -584,6 +603,7 @@ const MOODS={
 };
 const MOOD_NAME={night:'夜景',warm:'暖光',cold:'冷调',day:'日景',red:'压迫'};
 const LOOK_NAME={real:'写实',film:'电影感',anime:'动漫'};
+const LOOK_PROMPT={real:'写实摄影风格，真实质感',film:'电影感画面，胶片质感，电影级布光',anime:'日系动漫插画风格，线条干净，色彩明亮'};
 const SCALES=['远景','全景','中景','近景','特写'],CAMS=['固定','推','拉','摇','跟','手持'];
 const CHAR_COLORS=['#E4572E','#3A86FF','#2A9D8F','#F4A261','#C44569','#7A9E3A'];
 const GENRES={
@@ -639,7 +659,7 @@ function mockStoryboard(story){
 }
 function defaultPrompt(s){
   const cast=(s.cast||[]).map(charById).filter(Boolean).map(c=>`${c.name}（${[c.role,c.look].filter(Boolean).join('，')}）`).join('、');
-  return `${s.scale}，${s.cam}镜头。${s.desc}${cast?`\n出镜角色：${cast}，保持与角色卡参考图一致。`:''}\n光线：${MOOD_NAME[s.mood]}。画风：${LOOK_NAME[dr().look]}。画面比例：${dr().ratio}。`;
+  return `${s.scale}，${s.cam}镜头。${s.desc}${cast?`\n出镜角色：${cast}，保持与角色卡参考图一致。`:''}\n光线：${MOOD_NAME[s.mood]}。画风：${LOOK_PROMPT[dr().look]||LOOK_NAME[dr().look]}。画面比例：${dr().ratio}。`;
 }
 
 function figure(c,x,base,h,col,tint,rim,lw,img){
@@ -748,21 +768,50 @@ function renderCast(){
   const st=dr(),C=$('#cast');C.innerHTML='';
   st.chars.forEach(ch=>{
     const el=document.createElement('div');el.className='char';el.dataset.id=ch.id;
-    el.innerHTML=`<div class="av"><canvas></canvas><span class="src">${srcOf(ch)?'参考图':'自动形象'}</span></div><div class="char-f">
+    const canGen=LIVE.on&&LIVE.models.image,stale=ch.autoRef&&ch.refLook!==st.look;
+    const tag=!srcOf(ch)?'自动形象':ch.autoRef?(stale?'定妆照·画风已变':'定妆照'):'参考图';
+    el.innerHTML=`<div class="av"><canvas></canvas><span class="src ${stale?'stale':''}">${ch.busy?'生成中…':tag}</span></div><div class="char-f">
       <input type="text" class="nm" data-k="name" value="${esc(ch.name)}" aria-label="角色名">
       <input type="text" data-k="role" value="${esc(ch.role)}" placeholder="身份" aria-label="身份">
       <input type="text" data-k="look" value="${esc(ch.look)}" placeholder="外形，如 短发、灰色西装" aria-label="外形">
       <div class="char-acts"><div class="swatches">${CHAR_COLORS.map(c=>`<button type="button" style="background:${c}" data-color="${c}" aria-pressed="${c===ch.color}" aria-label="主色"></button>`).join('')}</div>
-      <label class="btn sm ghost file-label">参考图<input type="file" accept="image/*" data-up></label><button class="btn sm ghost danger" data-rm>删除</button></div></div>`;
+      ${canGen?`<button type="button" class="btn sm ghost" data-gen ${ch.busy?'disabled':''} title="按姓名、身份、外形和当前画风生成一张定妆照，作为每个镜头的参考">${ch.busy?'生成中…':srcOf(ch)?'重新生成定妆照':'生成定妆照'} <span class="cost">· ${PRICING.portrait}</span></button>`:''}
+      <label class="btn sm ghost file-label">上传参考图<input type="file" accept="image/*" data-up></label><button class="btn sm ghost danger" data-rm>删除</button></div></div>`;
     drawAvatar($('canvas',el),ch);C.appendChild(el)});
   C.insertAdjacentHTML('beforeend','<button class="add-char" id="addChar">＋ 添加角色</button>');
+  const need=st.chars.filter(c=>needPortrait(c,st.look)&&!c.busy),b=$('#genPortraits');
+  b.hidden=!(LIVE.on&&LIVE.models.image)||!need.length;b.innerHTML=`生成全部定妆照 <span class="cost">· ${num(need.length*PRICING.portrait)} 积分</span>`;
   if(dr().step===1)renderLooks();
 }
 $('#cast').addEventListener('input',e=>{const el=e.target.closest('.char'),k=e.target.dataset.k;if(!el||!k)return;const ch=charById(el.dataset.id);ch[k]=e.target.value;dr().dirty=true;if(k==='name')drawAvatar($('canvas',el),ch);touch(DRAMA)});
-$('#cast').addEventListener('change',async e=>{if(!e.target.matches('[data-up]'))return;const f=e.target.files[0];if(!f)return;const proj=DRAMA,ch=charById(e.target.closest('.char').dataset.id);const r=await Store.putImage(f);delete ch.assetId;delete ch.localId;delete ch.fileUrl;Object.assign(ch,r);proj.state.dirty=true;touch(proj);if(DRAMA===proj){resetFrames('参考图已更新，关键帧需要重新生成');renderCast()}toast(`已为「${ch.name}」设置参考图`)});
+$('#cast').addEventListener('change',async e=>{if(!e.target.matches('[data-up]'))return;const f=e.target.files[0];if(!f)return;const proj=DRAMA,ch=charById(e.target.closest('.char').dataset.id);const r=await Store.putImage(f);delete ch.assetId;delete ch.localId;delete ch.fileUrl;delete ch.autoRef;delete ch.refLook;Object.assign(ch,r);proj.state.dirty=true;touch(proj);if(DRAMA===proj){resetFrames('参考图已更新，关键帧需要重新生成');renderCast()}toast(`已为「${ch.name}」设置参考图`)});
+/* ---- 角色定妆照：让同一个角色在每个镜头里长得一样 ---- */
+// 需要（重新）生成：还没有参考图，或者自动生成的定妆照画风和现在不一致；自己上传的参考图不动
+const needPortrait=(ch,look)=>!srcOf(ch)||(ch.autoRef&&ch.refLook!==look);
+function portraitPrompt(ch,look){
+  return `角色定妆照。${ch.name}${ch.role?'，'+ch.role:''}${ch.look?'，外形：'+ch.look:''}。${LOOK_PROMPT[look]||''}。半身像，人物居中、面向镜头，表情自然，纯浅灰色背景，光线均匀柔和，人物清晰完整，画面中不要出现文字和水印。`;
+}
+function castNeedingPortraits(st,shots){const ids=new Set(shots.flatMap(s=>s.cast||[]));return st.chars.filter(c=>ids.has(c.id)&&needPortrait(c,st.look)&&!c.busy)}
+async function genPortraits(proj,chars){
+  if(!chars.length)return 0;if(!spend(proj,chars.length*PRICING.portrait))return 0;
+  const st=proj.state,look=st.look,rer=()=>{if(DRAMA===proj&&st.step===1)renderCast()};
+  chars.forEach(c=>c.busy=true);rer();let ok=0,lastErr='';
+  await pool(chars,3,async ch=>{
+    try{const r=await api('/api/image',{prompt:portraitPrompt(ch,look),width:768,height:1024});
+      delete ch.localId;delete ch.assetId;ch.fileUrl=r.url;ch.src=r.url;ch.autoRef=true;ch.refLook=look;ok++}
+    catch(e){refund(proj,PRICING.portrait);lastErr=e.message}
+    finally{delete ch.busy;rer()}});
+  st.dirty=true;touch(proj);
+  if(ok)logHistory(proj,`生成角色定妆照 ${ok} 张`,chars.map(c=>c.name).join('、'),ok*PRICING.portrait);
+  if(ok<chars.length)toast(`${chars.length-ok} 张定妆照生成失败，已退回积分：${lastErr}`);
+  return ok;
+}
+$('#genPortraits').onclick=async()=>{const proj=DRAMA,st=proj.state,need=st.chars.filter(c=>needPortrait(c,st.look)&&!c.busy);
+  const ok=await genPortraits(proj,need);if(ok){resetFrames('角色定妆照已更新，关键帧需要重新生成');toast(`已生成 ${ok} 张定妆照，之后每个镜头都会参考它们`)}};
 $('#cast').addEventListener('click',e=>{
   if(e.target.id==='addChar'){const st=dr();st.chars.push({id:rid('c'),name:'新角色',role:'',look:'',color:CHAR_COLORS[st.chars.length%CHAR_COLORS.length]});st.dirty=true;touch(DRAMA);renderCast();$$('#cast .nm').pop().select();return}
   const el=e.target.closest('.char');if(!el)return;const ch=charById(el.dataset.id);
+  if(e.target.closest('[data-gen]')){const proj=DRAMA;genPortraits(proj,[ch]).then(ok=>{if(ok&&DRAMA===proj){resetFrames('角色定妆照已更新，关键帧需要重新生成');toast(`已生成「${ch.name}」的定妆照`)}});return}
   const sw=e.target.closest('[data-color]');if(sw){ch.color=sw.dataset.color;dr().dirty=true;touch(DRAMA);renderCast();return}
   const rm=e.target.closest('[data-rm]');if(rm){if(!rm.dataset.c){rm.dataset.c=1;rm.textContent='确认删除';return}const st=dr();st.chars=st.chars.filter(c=>c.id!==ch.id);st.shots.forEach(s=>s.cast=s.cast.filter(id=>id!==ch.id));st.dirty=true;touch(DRAMA);renderCast()}
 });
@@ -833,10 +882,11 @@ $('#toKf').onclick=()=>{if(!dr().shots.length){toast('至少需要一个镜头')
 // ---- 关键帧确认
 function renderKf(){
   const st=dr(),S=st.shots,ok=S.filter(s=>s.kf==='ok'),ready=S.filter(s=>s.kf==='ready').length,none=S.filter(s=>s.kf==='none');
-  const genCost=none.length*PRICING.keyframe;
+  const portraits=LIVE.on&&LIVE.models.image?castNeedingPortraits(st,none).length:0;
+  const genCost=none.length*PRICING.keyframe+portraits*PRICING.portrait;
   $('#kfStats').innerHTML=`<div class="stat"><span>已确认</span><b style="color:var(--ok)">${ok.length}<span style="color:var(--mute);font-size:13px"> / ${S.length}</span></b></div><div class="stat"><span>待确认</span><b>${ready}</b></div><div class="stat"><span>未生成</span><b>${none.length}</b></div><div class="stat"><span>确认后视频预计</span><b>${num(videoCost(ok))}<span style="color:var(--mute);font-size:13px"> 积分</span></b></div>`;
   $('#kfOkAll').disabled=!ready;$('#toVideo').disabled=!ok.length;$('#kfGenAll').disabled=!none.length||genCost>APP.credits;
-  $('#kfGenAll').innerHTML=`生成全部关键帧${none.length?` <span class="cost">· ${num(genCost)} 积分</span>`:''}`;
+  $('#kfGenAll').innerHTML=`生成全部关键帧${none.length?` <span class="cost">· ${num(genCost)} 积分${portraits?`（含 ${portraits} 张定妆照）`:''}</span>`:''}`;
   const G=$('#kfGrid');G.classList.toggle('wide',st.ratio==='16:9');
   G.innerHTML=S.map((s,i)=>{
     const has=s.kf==='ok'||s.kf==='ready'||(s.kf==='run'&&s.kfPrev&&s.kfPrev!=='none');
@@ -866,7 +916,11 @@ function startKf(proj,shots,kind,extra={}){
       if(!q.length&&!active)touch(proj);else next()})}};
   next();kfRender(proj);return cost;
 }
-$('#kfGenAll').onclick=()=>{const proj=DRAMA,todo=dr().shots.filter(s=>s.kf==='none');const c=startKf(proj,todo,'new');if(c)logHistory(proj,`生成关键帧 ${todo.length} 张`,dr().title,c)};
+$('#kfGenAll').onclick=async()=>{
+  const proj=DRAMA,st=proj.state,todo=st.shots.filter(s=>s.kf==='none'),b=$('#kfGenAll');
+  const need=LIVE.on&&LIVE.models.image?castNeedingPortraits(st,todo):[];
+  if(need.length){b.disabled=true;b.textContent=`先生成 ${need.length} 张角色定妆照…`;await genPortraits(proj,need);if(DRAMA===proj&&st.step===3)renderKf()}
+  const c=startKf(proj,todo.filter(s=>s.kf==='none'),'new');if(c)logHistory(proj,`生成关键帧 ${todo.length} 张`,st.title,c)};
 $('#kfOkAll').onclick=()=>{const r=dr().shots.filter(s=>s.kf==='ready');r.forEach(s=>s.kf='ok');touch(DRAMA);renderKf();toast(`已确认 ${r.length} 张关键帧`)};
 $('#kfGrid').onclick=e=>{
   const b=e.target.closest('[data-k]');if(!b)return;const proj=DRAMA,S=dr().shots,s=S.find(x=>x.id===b.closest('.kf').dataset.id),no=pad2(S.indexOf(s)+1);
@@ -1002,7 +1056,9 @@ function resumeVideos(proj,shots){
 $('#exportVideo').onclick=async()=>{
   const L=playList();if(!LIVE.on||!L.every(s=>s.videoUrl)){toast('演示模式不能导出。部署后端后可导出 MP4 成片');return}
   const b=$('#exportVideo');b.disabled=true;b.textContent='合成中…';
-  try{const r=await api('/api/concat',{urls:L.map(s=>s.videoUrl),durs:L.map(s=>s.dur)});saveUrl(r.url,`${dr().title||'短剧'}.mp4`);toast('成片已合成，开始下载')}
+  const subtitles=dr().voice!=='无';
+  try{const r=await api('/api/concat',{urls:L.map(s=>s.videoUrl),durs:L.map(s=>s.dur),lines:L.map(s=>(speakerLine(s)||{}).text||''),ratio:dr().ratio,subtitles});
+    saveUrl(r.url,`${dr().title||'短剧'}.mp4`);toast(subtitles&&!r.subtitles?'成片已合成（没有找到中文字体，未加字幕），开始下载':'成片已合成，开始下载')}
   catch(e){toast(e.message+'，改为逐个下载镜头');L.forEach((s,i)=>setTimeout(()=>saveUrl(s.videoUrl,`S${pad2(dr().shots.indexOf(s)+1)}.mp4`),i*400))}
   finally{b.textContent='导出成片';renderStudio()}
 };
