@@ -6,7 +6,7 @@
 <title>帧间 Zhenjian</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500&display=swap">
-<link rel="stylesheet" href="styles.css?v=0.8.4">
+<link rel="stylesheet" href="styles.css?v=0.9.0">
 </head>
 <body>
 <div class="app">
@@ -19,11 +19,12 @@
       <button class="nav-btn" data-view="drama" aria-current="false"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="14" height="14" rx="3"/><path d="M16.5 10l5-3v10l-5-3z"/></svg>短剧生成</button>
       <div class="nav-grp">我的</div>
       <button class="nav-btn" data-view="projects" aria-current="false"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>项目</button>
+      <button class="nav-btn" data-view="settings" aria-current="false"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>设置</button>
       <button class="nav-btn" data-view="history" aria-current="false"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>历史</button>
     </nav>
     <div class="side-foot">
       <span class="cloud"><span class="dot" id="cloudDot"></span><span id="cloudTxt">正在连接存储…</span></span>
-      <span class="ver">v0.8</span>
+      <span class="ver">v0.9</span>
     </div>
   </aside>
   <div class="maincol">
@@ -218,6 +219,36 @@
       <div class="head"><div><h1>历史记录</h1><p>每一次生成任务的记录和积分消耗，可以直接跳回对应项目。</p></div></div>
       <div class="panel hist" id="histList"></div>
     </section>
+
+    <!-- ============ 设置 ============ -->
+    <section id="view-settings" hidden>
+      <div class="head"><div><h1>设置</h1><p>帧间用你自己的模型账号生成内容，费用由各平台直接从你的账户扣除。密钥只保存在这台电脑上，不会上传到其他地方。</p></div></div>
+      <div class="panel set-note" id="setNote" hidden></div>
+      <div class="set-grid" id="setGrid">
+        <section class="panel kcard" data-which="ark">
+          <div class="kcard-h"><h3>火山方舟 API Key</h3><span class="ktag req">必填</span><span class="kstate" data-state="ark"></span></div>
+          <p class="hint">用于生成商品图、关键帧和视频；没有填 DeepSeek 时，分镜也用它。</p>
+          <div class="kfields"><div class="field"><label class="label" for="kArk">API Key</label><input type="password" id="kArk" data-key="ark" autocomplete="off" spellcheck="false"><span class="kcur hint" data-cur="ark"></span></div></div>
+          <div class="kacts"><button type="button" class="btn sm" data-test="ark">测试连接</button><button type="button" class="btn sm ghost danger" data-clear="ark">清除</button><span class="kmsg hint" data-msg="ark"></span></div>
+          <details class="khow"><summary>怎么获取？</summary><ol><li>打开 <a href="https://console.volcengine.com/ark" target="_blank" rel="noopener">火山方舟控制台</a>，注册并完成实名认证。</li><li>在「API Key 管理」里创建一个 Key，复制过来。</li><li>在「开通管理」里开通图片生成、视频生成和文本大模型服务。</li></ol></details>
+        </section>
+        <section class="panel kcard" data-which="deepseek">
+          <div class="kcard-h"><h3>DeepSeek API Key</h3><span class="ktag ">可选</span><span class="kstate" data-state="deepseek"></span></div>
+          <p class="hint">填了以后，写分镜脚本改用 DeepSeek 官方接口。</p>
+          <div class="kfields"><div class="field"><label class="label" for="kDeepseek">API Key（sk- 开头）</label><input type="password" id="kDeepseek" data-key="deepseek" autocomplete="off" spellcheck="false"><span class="kcur hint" data-cur="deepseek"></span></div></div>
+          <div class="kacts"><button type="button" class="btn sm" data-test="deepseek">测试连接</button><button type="button" class="btn sm ghost danger" data-clear="deepseek">清除</button><span class="kmsg hint" data-msg="deepseek"></span></div>
+          <details class="khow"><summary>怎么获取？</summary><ol><li>打开 <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">DeepSeek 开放平台</a>，登录后充值少量余额。</li><li>创建 API Key，复制 sk- 开头的那一串。</li></ol></details>
+        </section>
+        <section class="panel kcard" data-which="kling">
+          <div class="kcard-h"><h3>可灵 AccessKey / SecretKey</h3><span class="ktag ">可选</span><span class="kstate" data-state="kling"></span></div>
+          <p class="hint">精品画质的视频。只填火山方舟也能生成视频。</p>
+          <div class="kfields"><div class="field"><label class="label" for="kKlingAk">AccessKey</label><input type="password" id="kKlingAk" data-key="klingAk" autocomplete="off" spellcheck="false"><span class="kcur hint" data-cur="klingAk"></span></div><div class="field"><label class="label" for="kKlingSk">SecretKey</label><input type="password" id="kKlingSk" data-key="klingSk" autocomplete="off" spellcheck="false"><span class="kcur hint" data-cur="klingSk"></span></div></div>
+          <div class="kacts"><button type="button" class="btn sm" data-test="kling">测试连接</button><button type="button" class="btn sm ghost danger" data-clear="kling">清除</button><span class="kmsg hint" data-msg="kling"></span></div>
+          <details class="khow"><summary>怎么获取？</summary><ol><li>打开 <a href="https://app.klingai.com/cn/dev" target="_blank" rel="noopener">可灵开放平台</a>，开通 API 服务。</li><li>在「API Key 管理」里创建一组 AccessKey 和 SecretKey。</li></ol></details>
+        </section>
+      </div>
+      <div class="set-foot" id="setFoot"><span class="hint">留空的项保持不变。保存后立即生效，不需要重启。</span><button type="button" class="btn primary" id="setSave">保存设置</button></div>
+    </section>
   </main>
   </div>
 </div>
@@ -242,6 +273,6 @@
 </div>
 <div class="toast" id="toast" hidden></div>
 <div class="gate" id="gate" hidden><form class="panel" id="gateForm"><h3 style="margin:0">输入访问口令</h3><span class="hint">这台服务器设置了访问口令，请向管理员获取。</span><input id="gateIn" type="password" autocomplete="current-password" placeholder="访问口令" aria-label="访问口令"><button class="btn primary" type="submit">进入</button></form></div>
-<script src="app.js?v=0.8.4"></script>
+<script src="app.js?v=0.9.0"></script>
 </body>
 </html>

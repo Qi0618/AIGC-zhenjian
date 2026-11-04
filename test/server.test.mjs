@@ -22,6 +22,10 @@ function startMock() {
       let body = ''; for await (const c of req) body += c;
       const j = body ? JSON.parse(body) : null; calls.push({ method: req.method, url: req.url, body: j, auth: req.headers.authorization });
       const json = o => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
+      if (req.url === '/models') { // 测试连接用：只认 ark-test 和 sk-aaaa…
+        const ok = ['Bearer ark-test', 'Bearer sk-' + 'a'.repeat(32)].includes(req.headers.authorization);
+        res.writeHead(ok ? 200 : 401, { 'content-type': 'application/json' }); return res.end(JSON.stringify(ok ? { data: [] } : { error: { message: 'bad key' } }));
+      }
       if (req.url === '/images/generations' && j.prompt === 'SLOW') { // 先回响应头，响应体迟迟不发完
         res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"data":'); return;
       }
@@ -56,7 +60,7 @@ before(async () => {
   await startMock();
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zhenjian-test-'));
   Object.assign(process.env, {
-    DATA_DIR: dataDir, ARK_API_KEY: 'ark-test', UPSTREAM_TIMEOUT_MS: '1500', DOWNLOAD_RETRIES: '3', ARK_BASE_URL: mockUrl, ACCESS_TOKEN: 'secret',
+    DATA_DIR: dataDir, ARK_API_KEY: 'ark-test', DEEPSEEK_BASE_URL: mockUrl, UPSTREAM_TIMEOUT_MS: '1500', DOWNLOAD_RETRIES: '3', ARK_BASE_URL: mockUrl, ACCESS_TOKEN: 'secret',
     // 显式置空，避免读到本地 .env 里的真实密钥
     DEEPSEEK_API_KEY: '', KLING_ACCESS_KEY: '', KLING_SECRET_KEY: '',
   });
@@ -181,7 +185,60 @@ test('视频：创建任务 → 查询完成 → 下载到本地；任务记录�
 test('精品视频未配置时返回 503，提示里不出现模型名', async () => {
   const r = await post('/api/video', { provider: 'kling', image: 'data:image/png;base64,AA==' });
   assert.equal(r.status, 503); const msg = (await r.json()).error;
-  assert.match(msg, /视频服务暂未开通/); assert.doesNotMatch(msg, /可灵|Kling|KLING/);
+  assert.match(msg, /视频服务还没有配置.*设置/); assert.doesNotMatch(msg, /可灵|Kling|KLING/);
+});
+
+const DS = 'sk-' + 'a'.repeat(32);
+const settings = body => post('/api/settings', body);
+
+test('设置：默认读取 .env，只返回末尾 4 位', async () => {
+  const j = await (await fetch(base + '/api/settings', { headers: H })).json();
+  assert.deepEqual(j.keys.ark, { set: true, tail: 'test', source: 'env' });
+  assert.equal(j.keys.deepseek.set, false);
+  assert.ok(!JSON.stringify(j).includes('ark-test'), '不能返回完整的 Key');
+});
+
+test('设置：拦下常见的粘贴错误', async () => {
+  for (const bad of [DS + 'abcd-1234-ffff-216d', 'sk-abc 123456789012345678', 'abc']) {
+    const r = await settings({ deepseek: bad });
+    assert.equal(r.status, 400, bad); assert.match((await r.json()).error, /DeepSeek/);
+  }
+  assert.equal((await settings({ ark: ' 前后有中文。' })).status, 400);
+});
+
+test('设置：保存后立即生效，可以清除，文件只有本人可读', async () => {
+  let j = await (await settings({ deepseek: '  ' + DS + '\n' })).json();
+  assert.deepEqual(j.keys.deepseek, { set: true, tail: 'aaaa', source: 'settings' });
+  await post('/api/storyboard', { story: STORY, enums: ENUMS });
+  assert.equal(calls.filter(c => c.url === '/chat/completions').pop().auth, 'Bearer ' + DS, '分镜改用新填的 DeepSeek Key');
+  assert.equal(fs.statSync(path.join(dataDir, 'settings.json')).mode & 0o777, 0o600);
+  j = await (await settings({ deepseek: '' })).json();
+  assert.equal(j.keys.deepseek.set, false);
+  await post('/api/storyboard', { story: STORY, enums: ENUMS });
+  assert.equal(calls.filter(c => c.url === '/chat/completions').pop().auth, 'Bearer ark-test', '清除后回到火山方舟');
+});
+
+test('设置：测试连接走免费接口，能分辨 Key 对错', async () => {
+  const t = async b => (await post('/api/settings/test', b)).json();
+  assert.deepEqual(await t({ which: 'ark' }), { ok: true, message: '连接成功' });
+  assert.equal((await t({ which: 'ark', key: 'wrong-key-1234567890' })).ok, false);
+  assert.equal((await t({ which: 'deepseek', key: DS })).ok, true);
+  assert.match((await t({ which: 'deepseek', key: DS + 'xyz-1' })).message, /多粘/);
+  assert.match((await t({ which: 'kling' })).message, /都要填写/);
+});
+
+test('请求来源检查：挡住跨站请求和 DNS 重绑定', () => {
+  const opt = { token: '', bindHost: '127.0.0.1' };
+  assert.equal(app.checkRequest({ method: 'POST', contentType: 'text/plain', host: 'localhost:8787' }, opt)[0], 415);
+  assert.equal(app.checkRequest({ method: 'POST', contentType: 'application/json', host: 'evil.example:8787' }, opt)[0], 403);
+  assert.equal(app.checkRequest({ method: 'POST', contentType: 'application/json; charset=utf-8', host: '127.0.0.1:8787' }, opt), null);
+  assert.equal(app.checkRequest({ method: 'GET', host: 'localhost' }, opt), null);
+  assert.equal(app.checkRequest({ method: 'GET', host: 'evil.example' }, { token: 'x', bindHost: '127.0.0.1' }), null, '设置了口令时由口令把关');
+  assert.equal(app.checkRequest({ method: 'GET', host: 'nas.local' }, { token: '', bindHost: '0.0.0.0' }), null, '开放给局域网时不限制 Host');
+});
+
+test('POST 不是 JSON 时直接拒绝', async () => {
+  assert.equal((await post('/api/image', { prompt: 'x' }, { ...H, 'content-type': 'text/plain' })).status, 415);
 });
 
 test('静态文件：白名单之外带扩展名的路径 404，其余回落首页', async () => {

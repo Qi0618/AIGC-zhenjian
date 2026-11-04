@@ -4,7 +4,7 @@ RUN apk add --no-cache ffmpeg
 WORKDIR /app
 COPY package.json index.html styles.css app.js ./
 COPY server ./server
-ENV PORT=8787 DATA_DIR=/data
+ENV PORT=8787 DATA_DIR=/data HOST=0.0.0.0
 RUN mkdir -p /data && chown node:node /data
 VOLUME /data
 EXPOSE 8787

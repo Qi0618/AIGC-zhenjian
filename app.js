@@ -39,7 +39,7 @@ try{LIVE.token=localStorage.getItem('hy-token')||''}catch(e){}
 async function detectLive(){
   if(!/^https?:$/.test(location.protocol))return;
   try{const r=await fetch('/api/health',{cache:'no-store'});if(!r.ok)return;const j=await r.json();
-    if(j&&j.ok===true&&j.models)Object.assign(LIVE,{on:true,auth:!!j.auth,ffmpeg:!!j.ffmpeg,models:j.models})}catch(e){}
+    if(j&&j.ok===true&&j.models)Object.assign(LIVE,{on:true,auth:!!j.auth,ffmpeg:!!j.ffmpeg,models:j.models,settings:j.settings!==false})}catch(e){}
 }
 async function api(path,body){
   const r=await fetch(path,{method:body?'POST':'GET',headers:{...(body?{'content-type':'application/json'}:{}),...(LIVE.token?{'x-access-token':LIVE.token}:{})},body:body?JSON.stringify(body):undefined});
@@ -149,8 +149,8 @@ function saveUrl(url,name){const a=document.createElement('a');a.href=url;a.down
 function showGate(){$('#gate').hidden=false;setTimeout(()=>$('#gateIn').focus(),50)}
 function applyMode(){
   if(!LIVE.on)return;const M=LIVE.models,any=M.image||M.llm||M.seedance;
-  $('#modeKicker').innerHTML=any?'<b>已就绪</b>AI 生图、分镜与视频生成均可使用':'<b>待配置</b>服务已连接，还没有完成配置';
-  $$('.modeBadge').forEach(b=>b.innerHTML=any?'<b style="color:var(--ok)">●</b> 已就绪':'<b>●</b> 服务未配置');
+  $('#modeKicker').innerHTML=any?'<b>已就绪</b>AI 生图、分镜与视频生成均可使用':'<b>待配置</b>还没有填写模型密钥 · <a data-view-link="settings">去设置</a>';
+  $$('.modeBadge').forEach(b=>b.innerHTML=any?'<b style="color:var(--ok)">●</b> 已就绪':'<b>●</b> <a data-view-link="settings">未配置，去设置</a>');
   if(LIVE.auth&&!LIVE.token)showGate();
 }
 const DEFAULT_CREDITS=3000;
@@ -1032,6 +1032,56 @@ $$('[data-goto]').forEach(b=>b.onclick=()=>setView(b.dataset.goto));
 $('#newShop').onclick=()=>{openProject(newProject('shop'));toast('已新建电商项目')};
 $('#newDrama').onclick=()=>{openProject(newProject('drama'));toast('已新建短剧项目')};
 
+/* ---------- 设置：填写 / 测试模型密钥 ---------- */
+const CARD_KEYS={ark:['ark'],deepseek:['deepseek'],kling:['klingAk','klingSk']};
+let SET=null;
+async function renderSettings(){
+  const note=$('#setNote'),grid=$('#setGrid'),foot=$('#setFoot');
+  const block=msg=>{note.hidden=false;note.innerHTML=msg;grid.hidden=foot.hidden=true};
+  if(!LIVE.on)return block('现在是<b>演示模式</b>，没有连接到帧间服务，这里的设置不可用。下载帧间并双击启动后，再来这里填写密钥。');
+  if(!LIVE.settings)return block('密钥只能在运行帧间的那台电脑上修改。');
+  note.hidden=true;grid.hidden=foot.hidden=false;
+  try{SET=await api('/api/settings')}catch(e){return block('读取设置失败：'+esc(e.message))}
+  fillSettings();
+}
+function fillSettings(){
+  if(!SET)return;const K=SET.keys;
+  $$('#setGrid [data-cur]').forEach(el=>{const k=K[el.dataset.cur];el.textContent=k.set?`已保存 ••••${k.tail}${k.source==='env'?'（来自 .env 文件）':''}`:'未填写'});
+  $$('#setGrid input[data-key]').forEach(i=>{i.value='';i.placeholder=K[i.dataset.key].set?'留空则保持不变':'在这里粘贴'});
+  $$('#setGrid [data-state]').forEach(el=>{const ok=CARD_KEYS[el.dataset.state].every(k=>K[k].set);el.innerHTML=`<span class="dot ${ok?'on':''}"></span>${ok?'已配置':'未配置'}`});
+  $$('#setGrid [data-clear]').forEach(b=>{b.hidden=!CARD_KEYS[b.dataset.clear].some(k=>K[k].set);delete b.dataset.c;b.textContent='清除'});
+}
+function keyMsg(which,txt,cls){const m=$(`#setGrid [data-msg="${which}"]`);m.textContent=txt;m.className='kmsg hint'+(cls?' '+cls:'')}
+async function testCard(which){
+  const val=k=>$(`#setGrid input[data-key="${k}"]`).value.trim();
+  const body=which==='kling'?{which,ak:val('klingAk'),sk:val('klingSk')}:{which,key:val(which)};
+  keyMsg(which,'测试中…');
+  try{const r=await api('/api/settings/test',body);keyMsg(which,r.ok?'✓ '+r.message:'✗ '+r.message,r.ok?'ok':'bad');return r.ok}
+  catch(e){keyMsg(which,'✗ '+e.message,'bad');return false}
+}
+async function afterSettingsChange(){await detectLive();applyMode();renderWallet();refreshEstimates()}
+$('#setGrid').addEventListener('click',async e=>{
+  const t=e.target.closest('[data-test]');if(t){t.disabled=true;await testCard(t.dataset.test);t.disabled=false;return}
+  const c=e.target.closest('[data-clear]');if(!c)return;
+  if(!c.dataset.c){c.dataset.c=1;c.textContent='再点一次确认清除';return}
+  const which=c.dataset.clear,body={};CARD_KEYS[which].forEach(k=>body[k]='');
+  try{SET=await api('/api/settings',body);fillSettings();keyMsg(which,'已清除');await afterSettingsChange()}catch(err){toast('清除失败：'+err.message)}
+});
+$('#setGrid').addEventListener('input',e=>{const card=e.target.closest('.kcard');if(card)keyMsg(card.dataset.which,'')});
+$('#setSave').onclick=async()=>{
+  const body={},changed=new Set();
+  $$('#setGrid input[data-key]').forEach(i=>{const v=i.value.trim();if(v){body[i.dataset.key]=v;changed.add(i.closest('.kcard').dataset.which)}});
+  if(!changed.size){toast('没有需要保存的内容');return}
+  const b=$('#setSave');b.disabled=true;b.textContent='保存中…';
+  try{
+    SET=await api('/api/settings',body);fillSettings();await afterSettingsChange();
+    toast('已保存，正在测试连接…');
+    const res=await Promise.all([...changed].map(testCard));
+    toast(res.every(Boolean)?'设置已保存，连接正常，可以开始生成了':'设置已保存，但有密钥没通过测试，请检查');
+  }catch(e){toast('保存失败：'+e.message)}
+  finally{b.disabled=false;b.textContent='保存设置'}
+};
+
 /* ---------- 首页 ---------- */
 function homeShop(sku,type,style,size,seed,max){const cv=document.createElement('canvas');renderImage(cv,{sku,type,style,size,seed},max);return cv}
 function homeFrame(shot,look,wide,w,redo){const cv=document.createElement('canvas');const W=wide?w:Math.round(w*9/16),H=wide?Math.round(w*9/16):w;cv.width=W;cv.height=H;drawFrame(cv.getContext('2d'),W,H,{...shot,patches:[]},.5,{look,onImg:redo});return cv}
@@ -1074,8 +1124,8 @@ document.addEventListener('click',e=>{const l=e.target.closest('[data-view-link]
 
 function setView(v){
   APP.view=v;$$('.nav-btn').forEach(x=>x.setAttribute('aria-current',x.dataset.view===v));
-  ['home','shop','drama','projects','history'].forEach(k=>$('#view-'+k).hidden=k!==v);scrollTo(0,0);stopPlay();$$('.pop').forEach(p=>p.hidden=true);
-  if(v==='projects')renderProjects();if(v==='history')renderHistory();if(v==='home')renderHome();
+  ['home','shop','drama','projects','history','settings'].forEach(k=>$('#view-'+k).hidden=k!==v);scrollTo(0,0);stopPlay();$$('.pop').forEach(p=>p.hidden=true);
+  if(v==='projects')renderProjects();if(v==='history')renderHistory();if(v==='home')renderHome();if(v==='settings')renderSettings();
   try{localStorage.setItem('vs-view',v)}catch(e){}
 }
 $$('.nav-btn').forEach(b=>b.onclick=()=>setView(b.dataset.view));
@@ -1091,6 +1141,9 @@ async function init(){
   const [dot,txt]=STORE_TXT[Store.mode];$('#cloudDot').className='dot '+dot;$('#cloudTxt').textContent=txt;
   ensureCurrent();renderWallet();$('#bootMsg').remove();
   let v='home';try{v=localStorage.getItem('vs-view')||'home'}catch(e){}
-  setView(['home','shop','drama','projects','history'].includes(v)?v:'home');
+  setView(['home','shop','drama','projects','history','settings'].includes(v)?v:'home');
+  // 第一次打开、还没填任何密钥：直接带到设置页
+  const M=LIVE.models||{};
+  if(LIVE.on&&LIVE.settings&&!M.image&&!M.llm&&!M.kling){setView('settings');toast('欢迎使用帧间！先填写模型密钥，就可以开始生成了')}
 }
 (document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(init);

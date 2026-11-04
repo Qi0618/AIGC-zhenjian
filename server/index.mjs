@@ -13,17 +13,13 @@ loadEnv(path.join(ROOT, '.env'));
 
 const CFG = {
   port: +(process.env.PORT || 8787),
-  arkKey: process.env.ARK_API_KEY || '',
+  // 默认只监听本机：这是装在自己电脑上用的软件，局域网里的其他设备连不上，避免 Key 被别人用
+  host: process.env.HOST || '127.0.0.1',
   arkBase: (process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/$/, ''),
+  deepseekBase: (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, ''),
   imageModel: process.env.ARK_IMAGE_MODEL || 'doubao-seedream-4-0-20260415',
-  // 分镜大模型：默认走火山方舟；填了 DEEPSEEK_API_KEY 就改走 DeepSeek 官方接口
-  llmKey: process.env.DEEPSEEK_API_KEY || process.env.ARK_API_KEY || '',
-  llmBase: (process.env.DEEPSEEK_API_KEY ? (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com') : (process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3')).replace(/\/$/, ''),
-  llmModel: process.env.DEEPSEEK_API_KEY ? (process.env.DEEPSEEK_MODEL || 'deepseek-chat') : (process.env.ARK_LLM_MODEL || 'deepseek-v4-1-flash-260910'),
   seedanceModel: process.env.ARK_VIDEO_MODEL || 'doubao-seedance-2-0-mini-260615',
   seedanceRes: process.env.ARK_VIDEO_RESOLUTION || '720p',
-  klingAk: process.env.KLING_ACCESS_KEY || '',
-  klingSk: process.env.KLING_SECRET_KEY || '',
   klingBase: (process.env.KLING_BASE_URL || 'https://api-beijing.klingai.com').replace(/\/$/, ''),
   klingModel: process.env.KLING_MODEL || 'kling-v2-5-turbo',
   klingMode: process.env.KLING_MODE || 'pro', // pro = 1080p
@@ -32,6 +28,23 @@ const CFG = {
 };
 const FILES = path.join(CFG.dataDir, 'files');
 fs.mkdirSync(FILES, { recursive: true });
+
+/* ---------------- 密钥：网页「设置」里保存的优先，其次是 .env / 环境变量 ---------------- */
+const SETTINGS_FILE = path.join(CFG.dataDir, 'settings.json');
+export const KEY_FIELDS = { ark: 'ARK_API_KEY', deepseek: 'DEEPSEEK_API_KEY', klingAk: 'KLING_ACCESS_KEY', klingSk: 'KLING_SECRET_KEY' };
+let SAVED = {};
+try { SAVED = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) || {}; } catch {}
+// 设置里存了空字符串表示「清除」，此时也不再回落到 .env
+const keyOf = k => String((k in SAVED ? SAVED[k] : process.env[KEY_FIELDS[k]]) || '').trim();
+function applyKeys() {
+  CFG.arkKey = keyOf('ark'); CFG.klingAk = keyOf('klingAk'); CFG.klingSk = keyOf('klingSk');
+  // 分镜：填了 DeepSeek 的 Key 就走 DeepSeek 官方接口，否则走火山方舟
+  const ds = keyOf('deepseek');
+  CFG.llmKey = ds || CFG.arkKey;
+  CFG.llmBase = ds ? CFG.deepseekBase : CFG.arkBase;
+  CFG.llmModel = ds ? (process.env.DEEPSEEK_MODEL || 'deepseek-chat') : (process.env.ARK_LLM_MODEL || 'deepseek-v4-1-flash-260910');
+}
+applyKeys();
 const HAS_FFMPEG = spawnSync('ffmpeg', ['-version']).status === 0;
 
 /* ---------------- 小工具 ---------------- */
@@ -46,8 +59,8 @@ class HttpError extends Error { constructor(status, msg) { super(msg); this.stat
 // 页面上不显示具体用的哪家模型：缺配置时只告诉用户「暂未开通」，具体缺哪个密钥写到服务器日志里
 const need = (ok, what, label) => {
   if (ok) return;
-  console.warn(`${what} 未配置，请在 .env 里填写后重启服务`);
-  throw new HttpError(503, `${label}暂未开通，请联系管理员`);
+  console.warn(`${what} 未配置，可以在网页「设置」里填写`);
+  throw new HttpError(503, `${label}还没有配置，请到「设置」里填写密钥`);
 };
 const newId = () => Date.now().toString(36) + crypto.randomBytes(5).toString('hex');
 
@@ -228,10 +241,10 @@ ${shotRules(E)}`;
 }
 
 /* ---------------- 视频：Seedance 2.0 mini / 可灵 2.5 Turbo ---------------- */
-function klingJwt() {
+function klingJwt(ak = CFG.klingAk, sk = CFG.klingSk) {
   const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url'); const now = Math.floor(Date.now() / 1000);
-  const head = b64({ alg: 'HS256', typ: 'JWT' }), body = b64({ iss: CFG.klingAk, exp: now + 1800, nbf: now - 5 });
-  const sig = crypto.createHmac('sha256', CFG.klingSk).update(head + '.' + body).digest('base64url');
+  const head = b64({ alg: 'HS256', typ: 'JWT' }), body = b64({ iss: ak, exp: now + 1800, nbf: now - 5 });
+  const sig = crypto.createHmac('sha256', sk).update(head + '.' + body).digest('base64url');
   return `${head}.${body}.${sig}`;
 }
 const TASKS = new Map(); // 本地任务 id → {provider, upstreamId, url?}
@@ -307,6 +320,85 @@ async function concatVideos({ urls, durs }) {
   return { url: '/files/' + path.basename(out) };
 }
 
+/* ---------------- 设置：在网页里填写 / 测试密钥 ---------------- */
+const modelsStatus = () => ({ image: !!CFG.arkKey, llm: !!CFG.llmKey, seedance: !!CFG.arkKey, kling: !!(CFG.klingAk && CFG.klingSk) });
+// 只返回末尾 4 位，页面上用来确认填的是哪一个
+function settingsView() {
+  const keys = {};
+  for (const k of Object.keys(KEY_FIELDS)) {
+    const v = keyOf(k);
+    keys[k] = { set: !!v, tail: v ? v.slice(-4) : '', source: k in SAVED ? 'settings' : v ? 'env' : 'none' };
+  }
+  return { keys, models: modelsStatus() };
+}
+// 常见的粘贴错误在保存前就拦下来，比如前后带空格、两个 Key 粘在一起
+export function checkKey(k, v) {
+  if (v === '') return null;
+  if (v.length > 200 || /[\s"'，。]/.test(v)) return '里面有空格、引号或中文标点，请只粘贴 Key 本身';
+  if (k === 'deepseek' && !/^sk-[A-Za-z0-9]{16,64}$/.test(v)) return 'DeepSeek 的 Key 应该是 sk- 开头的一串字母数字，请检查是不是多粘了内容';
+  if (v.length < 16) return '长度太短，请检查是否粘贴完整';
+  return null;
+}
+async function saveSettings(body) {
+  const next = { ...SAVED };
+  for (const k of Object.keys(KEY_FIELDS)) {
+    if (typeof body[k] !== 'string') continue; // 没传的项保持不变
+    const v = body[k].trim(), bad = checkKey(k, v);
+    if (bad) throw new HttpError(400, `${SETTING_NAMES[k]}：${bad}`);
+    next[k] = v;
+  }
+  const tmp = SETTINGS_FILE + '.tmp';
+  await fsp.writeFile(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
+  await fsp.rename(tmp, SETTINGS_FILE);
+  SAVED = next; applyKeys();
+  return settingsView();
+}
+const SETTING_NAMES = { ark: '火山方舟 API Key', deepseek: 'DeepSeek API Key', klingAk: '可灵 AccessKey', klingSk: '可灵 SecretKey' };
+// 用「列出模型 / 任务」这类免费接口验证 Key，不会产生费用。没传新值就测已保存的
+async function testKey({ which, key, ak, sk }) {
+  const pick = (v, k) => (typeof v === 'string' && v.trim() ? v.trim() : keyOf(k));
+  const call = async (url, headers) => {
+    let r;
+    try { r = await fetch(url, { headers, signal: AbortSignal.timeout(20000) }); }
+    catch (e) { return { ok: false, message: e.name === 'TimeoutError' ? '连接超时，请检查网络' : '连不上服务器：' + e.message }; }
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401 || r.status === 403 || (j.code && [1000, 1001, 1002, 1003, 1004].includes(+j.code))) return { ok: false, message: 'Key 无效或已过期，请重新复制' };
+    if (!r.ok) return { ok: false, message: `服务返回 ${r.status}：${j.error?.message || j.message || '未知错误'}` };
+    return { ok: true, message: '连接成功' };
+  };
+  if (which === 'ark') {
+    const k = pick(key, 'ark'); if (!k) return { ok: false, message: '还没有填写' };
+    return call(CFG.arkBase + '/models', { authorization: 'Bearer ' + k });
+  }
+  if (which === 'deepseek') {
+    const k = pick(key, 'deepseek'); if (!k) return { ok: false, message: '还没有填写' };
+    const bad = checkKey('deepseek', k); if (bad) return { ok: false, message: bad };
+    return call(CFG.deepseekBase + '/models', { authorization: 'Bearer ' + k });
+  }
+  if (which === 'kling') {
+    const a = pick(ak, 'klingAk'), b = pick(sk, 'klingSk'); if (!a || !b) return { ok: false, message: 'AccessKey 和 SecretKey 都要填写' };
+    return call(CFG.klingBase + '/v1/videos/image2video?pageNum=1&pageSize=1', { authorization: 'Bearer ' + klingJwt(a, b) });
+  }
+  throw new HttpError(400, '不认识的测试项');
+}
+
+/* ---------------- 请求来源检查 ---------------- */
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const isLoopback = req => LOOPBACK.has(req.socket.remoteAddress);
+// 防止你正在浏览的其他网页偷偷调用本机接口（消耗额度、改密钥）：
+// 1) 写操作必须是 JSON 请求，跨站发送时浏览器会先发预检请求，而这里不响应预检，于是被拦下
+// 2) 只监听本机时，Host 必须是本机地址，挡住 DNS 重绑定
+const LOCAL_HOSTS = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+export function checkRequest({ method, contentType, host }, { token = CFG.accessToken, bindHost = CFG.host } = {}) {
+  if (method !== 'GET' && method !== 'HEAD' && !/^application\/json\b/i.test(contentType || '')) return [415, '请求格式不正确'];
+  if (!token && LOOPBACK.has(bindHost) && !LOCAL_HOSTS.test(host || '')) return [403, '只允许从本机访问'];
+  return null;
+}
+function guard(req) {
+  const bad = checkRequest({ method: req.method, contentType: req.headers['content-type'], host: req.headers.host });
+  if (bad) throw new HttpError(...bad);
+}
+
 /* ---------------- 路由 ---------------- */
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.mp4': 'video/mp4', '.svg': 'image/svg+xml', '.json': 'application/json' };
 async function serveStatic(req, res, file) {
@@ -338,12 +430,20 @@ export const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x'); const p = url.pathname;
   try {
     if (p.startsWith('/api/')) {
+      guard(req);
       if (CFG.accessToken && p !== '/api/health' && !tokenOk(req.headers['x-access-token'])) throw new HttpError(401, '需要访问口令');
       if (p === '/api/health') return send(res, 200, {
         ok: true, auth: !!CFG.accessToken, ffmpeg: HAS_FFMPEG,
         // 只告诉页面各项能不能用，不暴露具体模型
-        models: { image: !!CFG.arkKey, llm: !!CFG.llmKey, seedance: !!CFG.arkKey, kling: !!(CFG.klingAk && CFG.klingSk) },
+        models: modelsStatus(), settings: isLoopback(req) || !!CFG.accessToken,
       });
+      if (p.startsWith('/api/settings')) {
+        // 密钥只能在本机改；开放给其他电脑访问时必须设置访问口令
+        if (!isLoopback(req) && !CFG.accessToken) throw new HttpError(403, '只能在运行帧间的这台电脑上修改设置');
+        if (req.method === 'GET' && p === '/api/settings') return send(res, 200, settingsView());
+        if (req.method === 'POST' && p === '/api/settings') return send(res, 200, await saveSettings(await readJson(req)));
+        if (req.method === 'POST' && p === '/api/settings/test') return send(res, 200, await testKey(await readJson(req)));
+      }
       if (req.method === 'POST' && p === '/api/image') return send(res, 200, await genImage(await readJson(req)));
       if (req.method === 'POST' && p === '/api/storyboard') return send(res, 200, await genStoryboard(await readJson(req)));
       if (req.method === 'POST' && p === '/api/shot') return send(res, 200, await rewriteShot(await readJson(req)));
@@ -364,9 +464,9 @@ export const server = http.createServer(async (req, res) => {
 // 直接运行时才监听端口；测试里 import 这个文件时不自动启动
 const realpath = f => { try { return fs.realpathSync(f); } catch { return path.resolve(f); } };
 const isMain = !!process.argv[1] && realpath(process.argv[1]) === realpath(fileURLToPath(import.meta.url));
-if (isMain) server.listen(CFG.port, () => {
-  console.log(`帧间已启动：http://localhost:${CFG.port}`);
-  console.log(`  火山方舟（Seedream / DeepSeek / Seedance）：${CFG.arkKey ? '已配置' : '未配置 ARK_API_KEY'}`);
+if (isMain) server.listen(CFG.port, CFG.host, () => {
+  console.log(`帧间已启动：http://localhost:${CFG.port}${LOOPBACK.has(CFG.host) ? '' : `（监听 ${CFG.host}，其他设备也能访问${CFG.accessToken ? '' : '，建议设置 ACCESS_TOKEN'}）`}`);
+  console.log(`  火山方舟（Seedream / DeepSeek / Seedance）：${CFG.arkKey ? '已配置' : '未配置，请在网页「设置」里填写'}`);
   console.log(`  分镜模型：${CFG.llmKey ? CFG.llmModel + ' @ ' + CFG.llmBase : '未配置'}`);
   console.log(`  可灵 2.5 Turbo：${CFG.klingAk && CFG.klingSk ? '已配置' : '未配置（精品档不可用）'}`);
   console.log(`  ffmpeg 合成成片：${HAS_FFMPEG ? '可用' : '未安装'}`);
