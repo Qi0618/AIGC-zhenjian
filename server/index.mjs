@@ -382,6 +382,47 @@ async function testKey({ which, key, ak, sk }) {
   throw new HttpError(400, '不认识的测试项');
 }
 
+/* ---------------- 本机数据：项目 / 历史 / 积分 / 上传的图片 ---------------- */
+// 全部存在 data/ 下，备份或换电脑只要复制整个 data 文件夹
+const STORE = path.join(CFG.dataDir, 'store'), PROJ_DIR = path.join(STORE, 'projects');
+fs.mkdirSync(PROJ_DIR, { recursive: true });
+const HISTORY_FILE = path.join(STORE, 'history.json'), WALLET_FILE = path.join(STORE, 'wallet.json');
+const HISTORY_MAX = 500;
+const readJsonFile = async (f, d) => { try { return JSON.parse(await fsp.readFile(f, 'utf8')); } catch { return d; } };
+// 先写临时文件再改名，写到一半断电也不会留下损坏的文件；同一个文件的写入排队进行
+const writeQueue = new Map();
+function writeJsonFile(f, data) {
+  const run = (writeQueue.get(f) || Promise.resolve()).catch(() => {}).then(async () => {
+    const tmp = `${f}.${process.pid}.tmp`;
+    await fsp.writeFile(tmp, JSON.stringify(data)); await fsp.rename(tmp, f);
+  });
+  writeQueue.set(f, run); return run;
+}
+const projFile = id => {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new HttpError(400, '项目 id 不正确');
+  return path.join(PROJ_DIR, id + '.json');
+};
+async function loadStore() {
+  const names = (await fsp.readdir(PROJ_DIR)).filter(n => n.endsWith('.json'));
+  const projects = (await Promise.all(names.map(n => readJsonFile(path.join(PROJ_DIR, n), null).then(d => d && { ...d, id: n.slice(0, -5) })))).filter(Boolean);
+  const wallet = await readJsonFile(WALLET_FILE, {});
+  return { projects, history: await readJsonFile(HISTORY_FILE, []), credits: typeof wallet.credits === 'number' ? wallet.credits : null };
+}
+async function addHistory(h) {
+  if (!h || typeof h !== 'object') throw new HttpError(400, '记录格式不正确');
+  const list = await readJsonFile(HISTORY_FILE, []);
+  list.unshift({ ...h, id: h.id || newId() });
+  await writeJsonFile(HISTORY_FILE, list.slice(0, HISTORY_MAX));
+  return { ok: true };
+}
+// 上传图片（商品图、角色参考图）：前端发 data URL，存成文件后返回 /files/ 地址
+async function uploadImage({ dataUrl }) {
+  const m = /^data:image\/(png|jpe?g|webp|gif);base64,([A-Za-z0-9+/=\s]+)$/.exec(String(dataUrl || ''));
+  if (!m) throw new HttpError(400, '只能上传 PNG、JPG、WebP 或 GIF 图片');
+  const buf = Buffer.from(m[2], 'base64'); if (!buf.length) throw new HttpError(400, '图片是空的');
+  return { url: await saveFile(buf, m[1] === 'jpeg' ? 'jpg' : m[1]) };
+}
+
 /* ---------------- 请求来源检查 ---------------- */
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const isLoopback = req => LOOPBACK.has(req.socket.remoteAddress);
@@ -444,6 +485,18 @@ export const server = http.createServer(async (req, res) => {
         if (req.method === 'POST' && p === '/api/settings') return send(res, 200, await saveSettings(await readJson(req)));
         if (req.method === 'POST' && p === '/api/settings/test') return send(res, 200, await testKey(await readJson(req)));
       }
+      if (p === '/api/store' && req.method === 'GET') return send(res, 200, await loadStore());
+      if (p.startsWith('/api/store/projects/')) {
+        const f = projFile(decodeURIComponent(p.slice(20)));
+        if (req.method === 'PUT') { const d = await readJson(req); if (!d || typeof d !== 'object' || Array.isArray(d)) throw new HttpError(400, '项目格式不正确'); delete d.id; await writeJsonFile(f, d); return send(res, 200, { ok: true }); }
+        if (req.method === 'DELETE') { await fsp.rm(f, { force: true }); return send(res, 200, { ok: true }); }
+      }
+      if (p === '/api/store/history' && req.method === 'POST') return send(res, 200, await addHistory(await readJson(req)));
+      if (p === '/api/store/wallet' && req.method === 'PUT') {
+        const { credits } = await readJson(req); if (typeof credits !== 'number' || !isFinite(credits)) throw new HttpError(400, '积分格式不正确');
+        await writeJsonFile(WALLET_FILE, { credits }); return send(res, 200, { ok: true });
+      }
+      if (p === '/api/upload' && req.method === 'POST') return send(res, 200, await uploadImage(await readJson(req)));
       if (req.method === 'POST' && p === '/api/image') return send(res, 200, await genImage(await readJson(req)));
       if (req.method === 'POST' && p === '/api/storyboard') return send(res, 200, await genStoryboard(await readJson(req)));
       if (req.method === 'POST' && p === '/api/shot') return send(res, 200, await rewriteShot(await readJson(req)));

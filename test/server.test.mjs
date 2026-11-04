@@ -241,6 +241,41 @@ test('POST 不是 JSON 时直接拒绝', async () => {
   assert.equal((await post('/api/image', { prompt: 'x' }, { ...H, 'content-type': 'text/plain' })).status, 415);
 });
 
+test('本机存储：项目增删改、历史、积分都写进 data/store', async () => {
+  const put = (id, d) => fetch(base + '/api/store/projects/' + id, { method: 'PUT', headers: H, body: JSON.stringify(d) });
+  let j = await (await fetch(base + '/api/store', { headers: H })).json();
+  assert.deepEqual(j, { projects: [], history: [], credits: null });
+  assert.equal((await put('p1', { name: '第一版', kind: 'shop', state: { skus: [] } })).status, 200);
+  assert.equal((await put('p1', { name: '改名了', kind: 'shop', state: { skus: [1] } })).status, 200);
+  await put('p2', { name: '短剧', kind: 'drama' });
+  await post('/api/store/history', { text: '生成 3 张', cost: 12, at: 1 });
+  await post('/api/store/history', { text: '生成分镜', cost: 2, at: 2 });
+  await fetch(base + '/api/store/wallet', { method: 'PUT', headers: H, body: JSON.stringify({ credits: 2988 }) });
+  j = await (await fetch(base + '/api/store', { headers: H })).json();
+  assert.deepEqual(j.projects.map(x => [x.id, x.name]).sort(), [['p1', '改名了'], ['p2', '短剧']]);
+  assert.deepEqual(j.history.map(h => h.text), ['生成分镜', '生成 3 张'], '新的在前');
+  assert.equal(j.credits, 2988);
+  assert.ok(fs.existsSync(path.join(dataDir, 'store', 'projects', 'p1.json')));
+  await fetch(base + '/api/store/projects/p2', { method: 'DELETE', headers: H });
+  j = await (await fetch(base + '/api/store', { headers: H })).json();
+  assert.deepEqual(j.projects.map(x => x.id), ['p1']);
+});
+
+test('本机存储：拒绝不合法的项目 id 和数据', async () => {
+  const put = (id, body) => fetch(base + '/api/store/projects/' + id, { method: 'PUT', headers: H, body });
+  assert.equal((await put('..%2F..%2Fsettings', '{}')).status, 400, '不能跳出 projects 目录');
+  assert.equal((await put('ok', '[1,2]')).status, 400);
+  assert.equal((await fetch(base + '/api/store/wallet', { method: 'PUT', headers: H, body: '{"credits":"多"}' })).status, 400);
+});
+
+test('上传图片：存成文件返回地址，不接受非图片', async () => {
+  const r = await post('/api/upload', { dataUrl: 'data:image/png;base64,' + PNG.toString('base64') });
+  const { url } = await r.json(); assert.match(url, /^\/files\/[a-z0-9]+\.png$/);
+  assert.deepEqual(Buffer.from(await (await fetch(base + url)).arrayBuffer()), PNG);
+  assert.equal((await post('/api/upload', { dataUrl: 'data:text/html;base64,PGgxPg==' })).status, 400);
+  assert.equal((await post('/api/upload', { dataUrl: 'not a data url' })).status, 400);
+});
+
 test('静态文件：白名单之外带扩展名的路径 404，其余回落首页', async () => {
   assert.equal((await fetch(base + '/favicon.ico')).status, 404);
   assert.equal((await fetch(base + '/.env')).status, 404);

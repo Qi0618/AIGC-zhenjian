@@ -41,8 +41,9 @@ async function detectLive(){
   try{const r=await fetch('/api/health',{cache:'no-store'});if(!r.ok)return;const j=await r.json();
     if(j&&j.ok===true&&j.models)Object.assign(LIVE,{on:true,auth:!!j.auth,ffmpeg:!!j.ffmpeg,models:j.models,settings:j.settings!==false})}catch(e){}
 }
-async function api(path,body){
-  const r=await fetch(path,{method:body?'POST':'GET',headers:{...(body?{'content-type':'application/json'}:{}),...(LIVE.token?{'x-access-token':LIVE.token}:{})},body:body?JSON.stringify(body):undefined});
+async function api(path,body,method){
+  method=method||(body?'POST':'GET');
+  const r=await fetch(path,{method,headers:{...(method!=='GET'?{'content-type':'application/json'}:{}),...(LIVE.token?{'x-access-token':LIVE.token}:{})},body:body!==undefined?JSON.stringify(body):undefined});
   const j=await r.json().catch(()=>({}));
   if(r.status===401){showGate();throw new Error('需要访问口令')}
   if(!r.ok||j.error)throw new Error(j.error||('服务器返回 '+r.status));
@@ -182,6 +183,16 @@ const Store={mode:'memory',db:null,assets:null,
       const c=w.exists?w.data().credits:undefined;APP.credits=typeof c==='number'?c:DEFAULT_CREDITS;
       this.mode='cloud';return;
     }catch(e){this.db=null}
+    // 连上了帧间服务：数据存到本机 data 文件夹，换浏览器、清缓存都不会丢
+    if(LIVE.on){
+      try{
+        let d=await api('/api/store');
+        if(!d.projects.length&&!d.history.length&&d.credits===null)d=await migrateLocal()||d;
+        APP.projects=d.projects.map(x=>({...x,saved:true}));APP.history=d.history;
+        APP.credits=typeof d.credits==='number'?d.credits:DEFAULT_CREDITS;
+        this.mode='server';return;
+      }catch(e){console.warn('本机存储不可用，改用浏览器存储',e)}
+    }
     try{
       localStorage.setItem('vs:t','1');localStorage.removeItem('vs:t');
       const map=LS.get('vs:projects',{});APP.projects=Object.entries(map).map(([id,d])=>({id,...d,saved:true}));
@@ -194,29 +205,53 @@ const Store={mode:'memory',db:null,assets:null,
   async saveProject(p){
     const doc=projDoc(p);
     if(this.mode==='cloud')return this.db.doc(APP.base+'/projects/'+p.id).set(doc);
+    if(this.mode==='server')return api('/api/store/projects/'+p.id,doc,'PUT');
     if(this.mode==='local'){const m=LS.get('vs:projects',{});m[p.id]=doc;if(!LS.set('vs:projects',m))throw new Error('浏览器存储空间不足');return}
   },
   async deleteProject(id){
     if(this.mode==='cloud')return this.db.doc(APP.base+'/projects/'+id).delete();
+    if(this.mode==='server')return api('/api/store/projects/'+id,undefined,'DELETE');
     if(this.mode==='local'){const m=LS.get('vs:projects',{});delete m[id];LS.set('vs:projects',m)}
   },
   async addHistory(h){
     if(this.mode==='cloud')return this.db.collection(APP.base+'/history').add(h);
+    if(this.mode==='server')return api('/api/store/history',h);
     if(this.mode==='local'){const a=LS.get('vs:history',[]);a.unshift(h);LS.set('vs:history',a.slice(0,300))}
   },
   async saveWallet(){
     if(this.mode==='cloud')return this.db.doc(APP.base).set({credits:APP.credits});
+    if(this.mode==='server')return api('/api/store/wallet',{credits:APP.credits},'PUT');
     if(this.mode==='local')LS.set('vs:credits',APP.credits);
   },
   async putImage(file){
+    if(this.mode==='server'){try{const url=await uploadBlob(file);return{fileUrl:url,src:url}}catch(e){toast('图片没能保存到本机：'+e.message+'，仅本次会话可用')}}
     if(this.mode==='cloud'&&this.assets){try{const r=await this.assets.upload(file);return{src:r.url,assetId:r.id}}catch(e){toast('图片未能存到云端，仅本次会话可用')}}
     if(this.mode==='local'&&IDB.db){try{const id=rid('img');await IDB.put(id,file);LOCAL_URL[id]=URL.createObjectURL(file);return{localId:id,src:LOCAL_URL[id]}}catch(e){}}
     const dataUrl=await new Promise(res=>{const r=new FileReader();r.onload=()=>res(r.result);r.readAsDataURL(file)});return{src:dataUrl};
   },
 };
-const srcOf=o=>o.src||(o.assetId?'/_blob/'+o.assetId:o.localId?LOCAL_URL[o.localId]:null);
-const keepImg=o=>o.assetId||o.localId||o.sample;
-const STORE_TXT={cloud:['on','已连接云端存储'],local:['on','数据保存在本浏览器'],memory:['off','未连接存储，仅保存在本次会话']};
+const srcOf=o=>o.src||o.fileUrl||(o.assetId?'/_blob/'+o.assetId:o.localId?LOCAL_URL[o.localId]:null);
+const keepImg=o=>o.fileUrl||o.assetId||o.localId||o.sample;
+const blobToDataUrl=b=>new Promise((ok,bad)=>{const r=new FileReader();r.onload=()=>ok(r.result);r.onerror=()=>bad(r.error);r.readAsDataURL(b)});
+async function uploadBlob(b){return (await api('/api/upload',{dataUrl:await blobToDataUrl(b)})).url}
+/* 旧版本把数据存在浏览器里。第一次用本机存储时，把项目、历史、积分和上传过的图片搬过去（只搬一次） */
+async function migrateLocal(){
+  let map,hist,credits;
+  try{if(localStorage.getItem('vs:migrated'))return null;map=LS.get('vs:projects',{});hist=LS.get('vs:history',[]);credits=LS.get('vs:credits',null)}catch(e){return null}
+  const ids=Object.keys(map);if(!ids.length&&!hist.length&&credits===null)return null;
+  let blobs={};try{await IDB.open();blobs=await IDB.all()}catch(e){}
+  const moved={},fix=async o=>{if(!o||!o.localId)return;const b=blobs[o.localId];if(b){try{moved[o.localId]=moved[o.localId]||await uploadBlob(b);o.fileUrl=moved[o.localId];delete o.localId}catch(e){}}};
+  const projects=[];
+  for(const id of ids){const d=map[id];const st=d.state||{};
+    for(const k of st.skus||[])await fix(k);for(const c of st.chars||[])await fix(c);
+    await api('/api/store/projects/'+id,d,'PUT');projects.push({...d,id})}
+  for(const h of hist.slice().reverse())await api('/api/store/history',h); // 后端把新的插在最前面，所以从旧到新依次写入
+  if(typeof credits==='number')await api('/api/store/wallet',{credits},'PUT');
+  try{localStorage.setItem('vs:migrated',String(Date.now()))}catch(e){}
+  setTimeout(()=>toast(`已把浏览器里的 ${ids.length} 个项目迁移到本机 data 文件夹`),1500);
+  return{projects,history:hist,credits:typeof credits==='number'?credits:null};
+}
+const STORE_TXT={server:['on','数据保存在本机 data 文件夹'],cloud:['on','已连接云端存储'],local:['on','数据保存在本浏览器'],memory:['off','未连接存储，仅保存在本次会话']};
 
 const saveTimers={},saving={},pendingSave={};
 function projDoc(p){return{name:p.name,kind:p.kind,updatedAt:p.updatedAt,spent:p.spent||0,state:p.kind==='shop'?packShop(p.state):packDrama(p.state)}}
@@ -231,7 +266,7 @@ async function saveProject(p){
 }
 function showSave(p,txt){
   const el=p===SHOP?$('#saveShop'):p===DRAMA?$('#saveDrama'):null;if(!el)return;
-  const where=Store.mode==='cloud'?'已保存到云端':'已保存在本浏览器';
+  const where=Store.mode==='cloud'?'已保存到云端':Store.mode==='server'?'已保存到本机':'已保存在本浏览器';
   if(!txt)txt=Store.mode==='memory'?'仅本次会话，刷新后丢失':p.saved&&!p.dirty?where+' · '+hm(p.updatedAt):p.sample?'示例项目，修改后自动保存':'未保存';
   el.innerHTML=`<span class="dot ${Store.mode==='memory'?'off':p.saved&&!p.dirty?'on':''}"></span>${esc(txt)}`;
 }
@@ -420,7 +455,7 @@ function renderSkuEdit(){
   <div class="sku-edit-acts"><label class="btn sm file-label" for="kFile">替换商品图<input type="file" id="kFile" accept="image/*"></label><button class="btn sm ghost danger" id="kDel">删除此 SKU</button></div>`;
   let t;const upd=()=>{s.name=$('#kName').value;s.points=$('#kPoints').value;s.price=$('#kPrice').value;s.rev=(s.rev||0)+1;sh().results.forEach(r=>{if(r.skuId===s.id)r.dirty=true});touch(SHOP);clearTimeout(t);t=setTimeout(()=>{renderSkuList();renderGroups();renderPlan()},400)};
   ['kName','kPoints','kPrice'].forEach(id=>$('#'+id).addEventListener('input',upd));
-  $('#kFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;const r=await Store.putImage(f);delete s.sample;delete s.lost;delete s.assetId;delete s.localId;Object.assign(s,r);s.rev=(s.rev||0)+1;sh().results.forEach(x=>{if(x.skuId===s.id)x.dirty=true});touch(SHOP);renderSkuList();renderGroups();renderPlan();toast('已替换商品图，相关图片已重绘')};
+  $('#kFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;const r=await Store.putImage(f);delete s.sample;delete s.lost;delete s.assetId;delete s.localId;delete s.fileUrl;Object.assign(s,r);s.rev=(s.rev||0)+1;sh().results.forEach(x=>{if(x.skuId===s.id)x.dirty=true});touch(SHOP);renderSkuList();renderGroups();renderPlan();toast('已替换商品图，相关图片已重绘')};
   $('#kDel').onclick=()=>{const b=$('#kDel');if(b.dataset.c){const st=sh();st.skus=st.skus.filter(x=>x.id!==s.id);st.results=st.results.filter(r=>r.skuId!==s.id);st.active=st.skus[0]?.id||null;touch(SHOP);renderShopAll();toast('已删除 SKU 及其图片')}else{b.dataset.c=1;b.textContent='再点一次确认删除'}};
 }
 $('#addSku').onclick=()=>{const s={id:rid('k'),name:'新商品',points:'',price:'',on:true};sh().skus.push(s);sh().active=s.id;touch(SHOP);renderSkuList();renderSkuEdit();renderPlan();$('#kName').select()};
@@ -723,7 +758,7 @@ function renderCast(){
   if(dr().step===1)renderLooks();
 }
 $('#cast').addEventListener('input',e=>{const el=e.target.closest('.char'),k=e.target.dataset.k;if(!el||!k)return;const ch=charById(el.dataset.id);ch[k]=e.target.value;dr().dirty=true;if(k==='name')drawAvatar($('canvas',el),ch);touch(DRAMA)});
-$('#cast').addEventListener('change',async e=>{if(!e.target.matches('[data-up]'))return;const f=e.target.files[0];if(!f)return;const proj=DRAMA,ch=charById(e.target.closest('.char').dataset.id);const r=await Store.putImage(f);delete ch.assetId;delete ch.localId;Object.assign(ch,r);proj.state.dirty=true;touch(proj);if(DRAMA===proj){resetFrames('参考图已更新，关键帧需要重新生成');renderCast()}toast(`已为「${ch.name}」设置参考图`)});
+$('#cast').addEventListener('change',async e=>{if(!e.target.matches('[data-up]'))return;const f=e.target.files[0];if(!f)return;const proj=DRAMA,ch=charById(e.target.closest('.char').dataset.id);const r=await Store.putImage(f);delete ch.assetId;delete ch.localId;delete ch.fileUrl;Object.assign(ch,r);proj.state.dirty=true;touch(proj);if(DRAMA===proj){resetFrames('参考图已更新，关键帧需要重新生成');renderCast()}toast(`已为「${ch.name}」设置参考图`)});
 $('#cast').addEventListener('click',e=>{
   if(e.target.id==='addChar'){const st=dr();st.chars.push({id:rid('c'),name:'新角色',role:'',look:'',color:CHAR_COLORS[st.chars.length%CHAR_COLORS.length]});st.dirty=true;touch(DRAMA);renderCast();$$('#cast .nm').pop().select();return}
   const el=e.target.closest('.char');if(!el)return;const ch=charById(el.dataset.id);
