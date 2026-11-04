@@ -94,12 +94,26 @@ async function fetchBody(url, opt, label, as = 'text') {
     throw new HttpError(502, `${label} 连接失败：${e.message}`);
   }
 }
+// 把模型平台的原始报错（多为英文，还带着模型 ID 和账号）翻成用户看得懂、知道怎么办的话；原文保留在 raw 里写日志
+export function friendlyError(label, status, msg) {
+  const m = String(msg || '');
+  if (/not activated|ModelNotOpen|has not been activated/i.test(m)) return `${label}还没有在火山方舟开通，请到火山方舟控制台「开通管理」里开通后再试`;
+  if (status === 401 || /invalid api key|api key.*invalid|authenticat|unauthorized/i.test(m)) return `${label}的密钥无效或已过期，请到「设置」里重新填写`;
+  if (/overdue|insufficient|balance|arrear|欠费|余额/i.test(m)) return `${label}的账户余额不足或已欠费，请先到对应平台充值`;
+  if (status === 429 || /rate.?limit|too many requests|RequestBurstTooFast|quota/i.test(m)) return `${label}请求太频繁或超出额度，请稍等一会儿再试`;
+  if (/sensitive|risk|审核|违规/i.test(m)) return `${label}判定内容可能不合规，请修改描述或图片后再试`;
+  return `${label}返回错误：${m}`;
+}
+function upstreamError(label, status, msg) {
+  const e = new HttpError(status >= 400 && status < 500 ? 400 : 502, friendlyError(label, status, msg));
+  e.raw = `${label} ${status}：${msg}`; return e;
+}
 async function upstream(url, opt, label) {
   const { r, body: text } = await fetchBody(url, opt, label);
   let j; try { j = JSON.parse(text); } catch { j = { raw: text.slice(0, 500) }; }
   if (!r.ok || (j && j.error)) {
     const msg = j?.error?.message || j?.message || j?.raw || r.statusText;
-    throw new HttpError(r.status >= 400 && r.status < 500 ? 400 : 502, `${label} 返回错误：${msg}`);
+    throw upstreamError(label, r.status, msg);
   }
   return j;
 }
@@ -268,7 +282,7 @@ async function createVideo({ provider = 'seedance', image, prompt = '', duration
       method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + klingJwt() },
       body: JSON.stringify({ model_name: CFG.klingModel, mode: CFG.klingMode, image: img.replace(/^data:[^,]+,/, ''), prompt: prompt.slice(0, 2400), duration: dur }),
     }, '视频服务');
-    if (j.code && j.code !== 0) throw new HttpError(400, '可灵返回错误：' + (j.message || j.code));
+    if (j.code && j.code !== 0) throw upstreamError('视频服务', 400, j.message || String(j.code));
     upstreamId = j.data?.task_id;
   } else {
     need(CFG.arkKey, '火山方舟 ARK_API_KEY', '视频服务');
@@ -514,7 +528,9 @@ export const server = http.createServer(async (req, res) => {
     if (!STATIC.has(p) && (path.extname(p) || path.basename(p).startsWith('.'))) { res.writeHead(404, SAFE_HEADERS); res.end('Not found'); return; }
     return serveStatic(req, res, path.join(ROOT, STATIC.has(p) ? p : '/index.html'));
   } catch (e) {
-    const status = e.status || 500; if (status >= 500) console.error(p, e.message);
+    // 5xx 和模型服务返回的错误都记到日志里（后者常是 4xx，比如模型没开通、参数不对），方便排查
+    const status = e.status || 500;
+    if (status >= 500 || e.raw) console.error(new Date().toLocaleTimeString('zh-CN'), req.method, p, status, e.raw || e.message);
     send(res, status, { error: e.message || '服务器错误' });
   }
 });

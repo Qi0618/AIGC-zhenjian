@@ -227,6 +227,17 @@ test('设置：测试连接走免费接口，能分辨 Key 对错', async () => 
   assert.match((await t({ which: 'kling' })).message, /都要填写/);
 });
 
+test('模型平台的报错翻成中文，不暴露模型 ID 和账号', () => {
+  const f = (m, st = 400) => app.friendlyError('视频服务', st, m);
+  const raw = 'Your account 2133938574 has not activated the model doubao-seedance-2-0-mini-260615. Please activate the model service in the Ark Console.';
+  assert.match(f(raw), /视频服务还没有在火山方舟开通.*开通管理/); assert.doesNotMatch(f(raw), /doubao|2133938574/);
+  assert.match(f('Authentication Fails, Your api key: ****216d is invalid', 401), /密钥无效.*设置/);
+  assert.match(f('AccountOverdueError: account balance is insufficient'), /余额不足/);
+  assert.match(f('Too Many Requests', 429), /太频繁/);
+  assert.match(f('The request failed because the input image may contain sensitive information'), /不合规/);
+  assert.equal(f('something else'), '视频服务返回错误：something else');
+});
+
 test('请求来源检查：挡住跨站请求和 DNS 重绑定', () => {
   const opt = { token: '', bindHost: '127.0.0.1' };
   assert.equal(app.checkRequest({ method: 'POST', contentType: 'text/plain', host: 'localhost:8787' }, opt)[0], 415);
